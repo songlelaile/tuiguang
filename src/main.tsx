@@ -18,10 +18,15 @@ type MetaSource = {
   dateField: string;
   start: string;
   end: string;
+  uploaded?: boolean;
+  mode?: "default" | "uploaded" | "empty";
+  cleared?: boolean;
 };
 
 type Meta = {
   dataDir: string;
+  uploadDir?: string;
+  sourceDataCleared?: boolean;
   sources: MetaSource[];
   scenes: string[];
   scenesByView?: Partial<Record<ViewKey, string[]>>;
@@ -41,6 +46,14 @@ const navItems: Array<{ key: ViewKey; label: string; icon: React.ComponentType<{
   { key: "crowds", label: "推广人群分析", icon: Users },
   { key: "contents", label: "推广内容分析", icon: WandSparkles },
   { key: "sources", label: "源数据", icon: FileSpreadsheet }
+];
+
+const sourceUploadSlots = [
+  { id: "product", label: "商品维度", accept: ".xlsx,.xls", hint: "XLSX / XLS" },
+  { id: "adItem", label: "推广商品", accept: ".csv", hint: "CSV" },
+  { id: "keyword", label: "推广关键词", accept: ".csv", hint: "CSV" },
+  { id: "crowd", label: "推广人群", accept: ".csv", hint: "CSV" },
+  { id: "content", label: "推广内容", accept: ".csv", hint: "CSV" }
 ];
 
 const endpoints: Partial<Record<ViewKey, string>> = {
@@ -227,7 +240,7 @@ function App() {
 
         {loading && <div className="stateLine">正在按当前筛选重算指标...</div>}
         {error && <div className="stateLine error">数据服务异常：{error}</div>}
-        {!error && active === "sources" && <SourcesView meta={meta} />}
+        {!error && active === "sources" && <SourcesView meta={meta} onMetaChange={setMeta} />}
         {!error && active === "product" && data && <ProductView data={data} />}
         {!error && active === "ad-products" && data && <AdProductsView data={data} />}
         {!error && active === "keywords" && data && <KeywordView data={data} />}
@@ -238,9 +251,15 @@ function App() {
   );
 }
 
-function SourcesView({ meta }: { meta: Meta | null }) {
+function SourcesView({ meta, onMetaChange }: { meta: Meta | null; onMetaChange: (meta: Meta) => void }) {
+  const [files, setFiles] = React.useState<Record<string, File | null>>({});
+  const [uploading, setUploading] = React.useState(false);
+  const [message, setMessage] = React.useState("");
+  const [inputKey, setInputKey] = React.useState(0);
+  const selectedCount = Object.values(files).filter(Boolean).length;
   const columns: ColumnDef<MetaSource>[] = [
     { key: "name", label: "来源表", width: "220px" },
+    { key: "mode", label: "数据模式", format: sourceModeLabel },
     { key: "rows", label: "行数", format: fmtInt },
     { key: "dateField", label: "日期字段" },
     { key: "start", label: "开始日期" },
@@ -248,8 +267,93 @@ function SourcesView({ meta }: { meta: Meta | null }) {
     { key: "file", label: "文件路径", width: "460px" }
   ];
 
+  async function readApiMessage(response: Response) {
+    const payload = await response.json().catch(() => null);
+    return payload?.error || response.statusText;
+  }
+
+  async function uploadSources() {
+    if (!selectedCount) return;
+    const formData = new FormData();
+    Object.entries(files).forEach(([key, file]) => {
+      if (file) formData.append(key, file);
+    });
+
+    setUploading(true);
+    setMessage("");
+    try {
+      const response = await fetch("/api/uploads/sources", { method: "POST", body: formData });
+      if (!response.ok) throw new Error(await readApiMessage(response));
+      const payload = await response.json();
+      onMetaChange(payload.meta);
+      setFiles({});
+      setInputKey((key) => key + 1);
+      setMessage(`已更新 ${fmtInt(payload.updated?.length || 0)} 张源表`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "上传失败");
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function clearSources() {
+    setUploading(true);
+    setMessage("");
+    try {
+      const response = await fetch("/api/uploads/sources", { method: "DELETE" });
+      if (!response.ok) throw new Error(await readApiMessage(response));
+      const payload = await response.json();
+      onMetaChange(payload.meta);
+      setFiles({});
+      setInputKey((key) => key + 1);
+      setMessage("已清空源数据");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "清空失败");
+    } finally {
+      setUploading(false);
+    }
+  }
+
   return (
     <section className="viewStack">
+      <div className="panel">
+        <div className="panelHeader">
+          <div>
+            <p className="eyebrow">数据接入</p>
+            <h2>自定义上传源表</h2>
+          </div>
+          <span className="pill">{meta?.sourceDataCleared ? "当前为空数据" : `上传目录: ${meta?.uploadDir || "uploads/source-data"}`}</span>
+        </div>
+        <div className="uploadGrid">
+          {sourceUploadSlots.map((slot) => {
+            const file = files[slot.id];
+            return (
+              <label key={`${slot.id}-${inputKey}`} className="uploadSlot">
+                <span>{slot.label}</span>
+                <strong>{file?.name || "选择文件"}</strong>
+                <em>{slot.hint}</em>
+                <input
+                  type="file"
+                  accept={slot.accept}
+                  onChange={(event) => {
+                    const fileValue = event.target.files?.[0] || null;
+                    setFiles((prev) => ({ ...prev, [slot.id]: fileValue }));
+                  }}
+                />
+              </label>
+            );
+          })}
+        </div>
+        <div className="uploadActions">
+          <button type="button" className="primaryButton" disabled={!selectedCount || uploading} onClick={uploadSources}>
+            {uploading ? "处理中" : "上传并重算"}
+          </button>
+          <button type="button" className="iconTextButton" disabled={uploading} onClick={clearSources}>
+            清空源数据
+          </button>
+        </div>
+        {message && <div className="uploadNotice">{message}</div>}
+      </div>
       <div className="panel">
         <div className="panelHeader">
           <div>
@@ -262,6 +366,12 @@ function SourcesView({ meta }: { meta: Meta | null }) {
       </div>
     </section>
   );
+}
+
+function sourceModeLabel(value: unknown) {
+  if (value === "uploaded") return "自定义";
+  if (value === "empty") return "已清空";
+  return "默认";
 }
 
 function ProductView({ data }: { data: AnyRecord }) {

@@ -297,6 +297,87 @@ h2 {
   color: #bce6df;
 }
 
+.uploadGrid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.uploadSlot {
+  display: grid;
+  gap: 8px;
+  min-height: 104px;
+  padding: 12px;
+  border: 1px dashed rgba(245, 200, 119, 0.32);
+  border-radius: 8px;
+  color: #d9d4c4;
+  background: rgba(245, 200, 119, 0.06);
+  cursor: pointer;
+}
+
+.uploadSlot:hover {
+  border-color: rgba(100, 198, 189, 0.5);
+  background: rgba(100, 198, 189, 0.08);
+}
+
+.uploadSlot span {
+  color: #a8ab99;
+  font-size: 12px;
+}
+
+.uploadSlot strong {
+  color: #f5c877;
+  font-size: 14px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.uploadSlot em {
+  color: #bce6df;
+  font-size: 12px;
+  font-style: normal;
+}
+
+.uploadSlot input {
+  display: none;
+}
+
+.uploadActions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.primaryButton {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: #10140c;
+  background: #f5c877;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.primaryButton:disabled,
+.iconTextButton:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.primaryButton:not(:disabled):hover {
+  background: #ffd98e;
+}
+
+.uploadNotice {
+  margin-top: 10px;
+  color: #bce6df;
+  font-size: 13px;
+}
+
 .splitGrid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(460px, 0.82fr);
@@ -502,6 +583,7 @@ tbody tr:hover td {
 @media (max-width: 1280px) {
   .splitGrid,
   .threeGrid,
+  .uploadGrid,
   .kpiGrid {
     grid-template-columns: 1fr;
   }

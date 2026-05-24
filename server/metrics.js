@@ -4,14 +4,8 @@ import { parse } from "csv-parse/sync";
 import XLSX from "xlsx";
 
 const dataDir = process.env.HUOPAN_DATA_DIR || "/Users/shaozhuang/Downloads/25年10月-26年1月whc";
-
-const sources = {
-  product: path.join(dataDir, "生参商品排行榜.xlsx"),
-  adItem: path.join(dataDir, "推广商品报表_20260118_130730.csv"),
-  content: path.join(dataDir, "推广内容报表_20260118_130815.csv"),
-  keyword: path.join(dataDir, "推广关键词报表_20260118_130845.csv"),
-  crowd: path.join(dataDir, "推广人群报表_20260118_130755.csv")
-};
+const uploadDir = process.env.HUOPAN_UPLOAD_DIR || path.resolve(process.cwd(), "uploads", "source-data");
+const clearedStateFile = path.join(uploadDir, ".sources-cleared");
 
 const sourceNames = {
   product: "店铺数据_商品维度",
@@ -21,7 +15,71 @@ const sourceNames = {
   crowd: "店铺数据_推广人群报表"
 };
 
+export const sourceUploadSlots = [
+  { id: "product", name: sourceNames.product, defaultFile: "生参商品排行榜.xlsx", uploadFile: "product.xlsx", extensions: [".xlsx", ".xls"] },
+  { id: "adItem", name: sourceNames.adItem, defaultFile: "推广商品报表_20260118_130730.csv", uploadFile: "adItem.csv", extensions: [".csv"] },
+  { id: "content", name: sourceNames.content, defaultFile: "推广内容报表_20260118_130815.csv", uploadFile: "content.csv", extensions: [".csv"] },
+  { id: "keyword", name: sourceNames.keyword, defaultFile: "推广关键词报表_20260118_130845.csv", uploadFile: "keyword.csv", extensions: [".csv"] },
+  { id: "crowd", name: sourceNames.crowd, defaultFile: "推广人群报表_20260118_130755.csv", uploadFile: "crowd.csv", extensions: [".csv"] }
+];
+
 let rawCache;
+
+async function fileExists(filePath) {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function defaultSourcePath(slot) {
+  return path.join(dataDir, slot.defaultFile);
+}
+
+export function getUploadDir() {
+  return uploadDir;
+}
+
+export function getUploadedSourcePath(sourceId) {
+  const slot = sourceUploadSlots.find((item) => item.id === sourceId);
+  if (!slot) throw new Error(`Unknown source id: ${sourceId}`);
+  return path.join(uploadDir, slot.uploadFile);
+}
+
+export function resetRawCache() {
+  rawCache = undefined;
+}
+
+export async function clearSourceData() {
+  await fs.rm(uploadDir, { recursive: true, force: true });
+  await fs.mkdir(uploadDir, { recursive: true });
+  await fs.writeFile(clearedStateFile, new Date().toISOString(), "utf8");
+  resetRawCache();
+}
+
+async function resolveSourceFiles() {
+  const sourceDataCleared = await fileExists(clearedStateFile);
+  const entries = await Promise.all(
+    sourceUploadSlots.map(async (slot) => {
+      const uploadedPath = getUploadedSourcePath(slot.id);
+      const uploaded = await fileExists(uploadedPath);
+      const mode = uploaded ? "uploaded" : sourceDataCleared ? "empty" : "default";
+      return [
+        slot.id,
+        {
+          ...slot,
+          file: mode === "empty" ? "" : uploaded ? uploadedPath : defaultSourcePath(slot),
+          uploaded,
+          mode,
+          cleared: mode === "empty"
+        }
+      ];
+    })
+  );
+  return Object.fromEntries(entries);
+}
 
 const moneyFields = new Set([
   "支付金额",
@@ -149,12 +207,15 @@ function parseExcelDate(value) {
 
 async function loadRaw() {
   if (rawCache) return rawCache;
+  const sources = await resolveSourceFiles();
+  const readResolvedCsv = (source) => (source.cleared ? [] : readCsv(source.file));
+  const readResolvedProduct = (source) => (source.cleared ? [] : readProductWorkbook(source.file));
   const [product, adItem, content, keyword, crowd] = await Promise.all([
-    readProductWorkbook(sources.product),
-    readCsv(sources.adItem),
-    readCsv(sources.content),
-    readCsv(sources.keyword),
-    readCsv(sources.crowd)
+    readResolvedProduct(sources.product),
+    readResolvedCsv(sources.adItem),
+    readResolvedCsv(sources.content),
+    readResolvedCsv(sources.keyword),
+    readResolvedCsv(sources.crowd)
   ]);
   rawCache = { product, adItem, content, keyword, crowd };
   return rawCache;
@@ -251,16 +312,30 @@ function enrichProductMetrics(row) {
 }
 
 export async function buildMeta() {
+  const sources = await resolveSourceFiles();
   const raw = await loadRaw();
   const uniqueScenes = (rows) => [...new Set(rows.map((row) => row["场景名字"]).filter(Boolean))].sort();
+  const sourceMeta = (id, rows, dateField) => ({
+    id,
+    name: sourceNames[id],
+    file: sources[id].file || "已清空源数据",
+    uploaded: sources[id].uploaded,
+    mode: sources[id].mode,
+    cleared: sources[id].cleared,
+    rows: rows.length,
+    dateField,
+    ...dateRange(rows, dateField)
+  });
   return {
     dataDir,
+    uploadDir,
+    sourceDataCleared: Object.values(sources).some((source) => source.cleared),
     sources: [
-      { id: "product", name: sourceNames.product, file: sources.product, rows: raw.product.length, dateField: "统计日期", ...dateRange(raw.product, "统计日期") },
-      { id: "adItem", name: sourceNames.adItem, file: sources.adItem, rows: raw.adItem.length, dateField: "日期", ...dateRange(raw.adItem, "日期") },
-      { id: "content", name: sourceNames.content, file: sources.content, rows: raw.content.length, dateField: "日期", ...dateRange(raw.content, "日期") },
-      { id: "keyword", name: sourceNames.keyword, file: sources.keyword, rows: raw.keyword.length, dateField: "日期", ...dateRange(raw.keyword, "日期") },
-      { id: "crowd", name: sourceNames.crowd, file: sources.crowd, rows: raw.crowd.length, dateField: "日期", ...dateRange(raw.crowd, "日期") }
+      sourceMeta("product", raw.product, "统计日期"),
+      sourceMeta("adItem", raw.adItem, "日期"),
+      sourceMeta("content", raw.content, "日期"),
+      sourceMeta("keyword", raw.keyword, "日期"),
+      sourceMeta("crowd", raw.crowd, "日期")
     ],
     scenes: uniqueScenes([...raw.adItem, ...raw.content, ...raw.keyword, ...raw.crowd]),
     scenesByView: {
