@@ -17,6 +17,9 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - ${UPLOADS_HOST_DIR:-./uploads}:/app/uploads
+    ports:
+      # 仅绑宿主机 loopback，由主服务器 nginx 反代过来；不直接对公网暴露
+      - "127.0.0.1:${APP_BIND_PORT:-5180}:5174"
     expose:
       - "5174"
     healthcheck:
@@ -31,7 +34,11 @@ services:
         max-size: "10m"
         max-file: "5"
 
+  # 容器内 nginx：仅"独立部署"模式启用。
+  # 主域名子站部署（推荐）由主服务器 nginx 接管 TLS/Basic Auth/反代，不需要这个。
+  # 启用方式：docker compose --profile standalone up -d --build
   nginx:
+    profiles: ["standalone"]
     image: nginx:1.27-alpine
     container_name: tuiguang-nginx
     restart: unless-stopped

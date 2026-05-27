@@ -1,0 +1,133 @@
+# =============================================================================
+# tuiguang.shaozhuangai.com —— 主服务器 nginx 站点配置模板
+#
+# 放置路径（Ubuntu/Debian）：
+#   /etc/nginx/sites-available/tuiguang.shaozhuangai.com
+# 然后启用：
+#   ln -s /etc/nginx/sites-available/tuiguang.shaozhuangai.com \
+#         /etc/nginx/sites-enabled/tuiguang.shaozhuangai.com
+#
+# 启用步骤总览：
+#   1) 先按"步骤一：HTTP-only 上线"那段配置上线（拿 Let's Encrypt 证书必须先有 80 端口可访）
+#   2) certbot --nginx -d tuiguang.shaozhuangai.com 拿证书
+#      certbot 会自动改这个文件加 SSL 段；或你也可以手动应用"步骤二：HTTPS 完整配置"
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# 步骤一：HTTP-only 上线（首次部署用，certbot 拿证书后用步骤二替换）
+# -----------------------------------------------------------------------------
+# server {
+#   listen 80;
+#   listen [::]:80;
+#   server_name tuiguang.shaozhuangai.com;
+#
+#   client_max_body_size 100M;
+#
+#   # 健康检查不要求登录，便于探活和 certbot
+#   location = /api/health {
+#     proxy_pass http://127.0.0.1:5180;
+#   }
+#   location /.well-known/acme-challenge/ {
+#     root /var/www/certbot;
+#   }
+#
+#   # 其它一律 Basic Auth
+#   auth_basic "tuiguang BI";
+#   auth_basic_user_file /etc/nginx/htpasswd-tuiguang;
+#
+#   location / {
+#     proxy_pass http://127.0.0.1:5180;
+#     proxy_http_version 1.1;
+#     proxy_set_header Host $host;
+#     proxy_set_header X-Real-IP $remote_addr;
+#     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+#     proxy_set_header X-Forwarded-Proto $scheme;
+#     proxy_read_timeout 300s;
+#     proxy_send_timeout 300s;
+#     proxy_request_buffering off;
+#   }
+# }
+
+
+# -----------------------------------------------------------------------------
+# 步骤二：HTTPS 完整配置（certbot 拿到证书后用这个版本）
+# certbot --nginx 会自动加 SSL 段；如果你想手动控制，把上面 HTTP 段整段
+# 替换成下面两段即可。
+# -----------------------------------------------------------------------------
+server {
+  listen 80;
+  listen [::]:80;
+  server_name tuiguang.shaozhuangai.com;
+
+  # ACME 续签需要 80 端口可达
+  location /.well-known/acme-challenge/ {
+    root /var/www/certbot;
+  }
+
+  # 其它强制跳 HTTPS
+  location / {
+    return 301 https://$host$request_uri;
+  }
+}
+
+server {
+  listen 443 ssl;
+  listen [::]:443 ssl;
+  http2 on;
+  server_name tuiguang.shaozhuangai.com;
+  server_tokens off;
+
+  # ---- TLS（路径由 certbot 创建并维护）----
+  ssl_certificate     /etc/letsencrypt/live/tuiguang.shaozhuangai.com/fullchain.pem;
+  ssl_certificate_key /etc/letsencrypt/live/tuiguang.shaozhuangai.com/privkey.pem;
+  include /etc/letsencrypt/options-ssl-nginx.conf;
+  ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+  # ---- 上传体积（与 .env 的 UPLOAD_MAX_MB 保持一致）----
+  client_max_body_size 100M;
+  client_body_timeout 300s;
+  proxy_read_timeout  300s;
+  proxy_send_timeout  300s;
+  proxy_request_buffering off;
+
+  # ---- 安全头 ----
+  add_header X-Frame-Options "DENY"        always;
+  add_header X-Content-Type-Options "nosniff" always;
+  add_header Referrer-Policy "no-referrer" always;
+  add_header Strict-Transport-Security "max-age=15768000" always;
+
+  # ---- gzip ----
+  gzip on;
+  gzip_vary on;
+  gzip_min_length 1024;
+  gzip_comp_level 5;
+  gzip_proxied any;
+  gzip_types
+    text/plain
+    text/css
+    application/json
+    application/javascript
+    application/xml
+    text/xml
+    image/svg+xml;
+
+  # ---- /api/health 免鉴权（云平台探活、监控用）----
+  location = /api/health {
+    auth_basic off;
+    proxy_pass http://127.0.0.1:5180;
+  }
+
+  # ---- 其它一律 Basic Auth ----
+  auth_basic "tuiguang BI";
+  auth_basic_user_file /etc/nginx/htpasswd-tuiguang;
+
+  location / {
+    proxy_pass http://127.0.0.1:5180;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+}
