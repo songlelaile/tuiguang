@@ -1,0 +1,15 @@
+node_modules
+dist
+uploads
+data
+.git
+.gitignore
+.env
+.env.local
+.env.*
+.DS_Store
+*.log
+deploy
+docker/htpasswd
+BI工具*.md
+README.md

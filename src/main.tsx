@@ -23,11 +23,31 @@ type MetaSource = {
   cleared?: boolean;
 };
 
+type AlignmentStatus = "aligned" | "partial" | "mismatch" | "incomplete";
+
+type AlignmentWarning = {
+  table: string;
+  label: string;
+  kind: "extends_start" | "extends_end" | "missing";
+  diffDays: number;
+  message: string;
+};
+
+type Alignment = {
+  status: AlignmentStatus;
+  intersection: { start: string; end: string };
+  union: { start: string; end: string };
+  perTable: Record<string, { start: string; end: string }>;
+  missing: string[];
+  warnings: AlignmentWarning[];
+};
+
 type Meta = {
   dataDir: string;
   uploadDir?: string;
   sourceDataCleared?: boolean;
   sources: MetaSource[];
+  alignment?: Alignment;
   scenes: string[];
   scenesByView?: Partial<Record<ViewKey, string[]>>;
 };
@@ -251,6 +271,126 @@ function App() {
   );
 }
 
+const alignmentStatusInfo: Record<AlignmentStatus, { label: string; tone: string; hint: string }> = {
+  aligned: { label: "对齐", tone: "ok", hint: "5 张源表的日期区间完全一致，可放心联表分析。" },
+  partial: { label: "部分对齐", tone: "warn", hint: "各表日期区间存在差异，共同区间内的联表分析最可靠；差异部分仅单表数据。" },
+  mismatch: { label: "未对齐", tone: "danger", hint: "至少两张源表日期区间没有重叠，联表分析可能为空。请检查导出范围是否一致。" },
+  incomplete: { label: "未齐", tone: "muted", hint: "尚未上齐 5 张源表，或某张表无有效日期。" }
+};
+
+function daysBetween(startIso: string, endIso: string): number {
+  if (!startIso || !endIso) return 0;
+  const start = Date.parse(`${startIso}T00:00:00Z`);
+  const end = Date.parse(`${endIso}T00:00:00Z`);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return 0;
+  return Math.round((end - start) / 86400000);
+}
+
+const timelineSlotOrder: Array<{ id: string; label: string }> = [
+  { id: "product", label: "商品维度" },
+  { id: "adItem", label: "推广商品" },
+  { id: "content", label: "推广内容" },
+  { id: "keyword", label: "推广关键词" },
+  { id: "crowd", label: "推广人群" }
+];
+
+function AlignmentTimeline({ alignment }: { alignment?: Alignment }) {
+  const [open, setOpen] = React.useState(false);
+  if (!alignment) {
+    return (
+      <div className="timeline timelineEmpty">
+        <span className="timelineBadge muted">未齐</span>
+        <span>上传源表后将自动展示时间线对齐情况</span>
+      </div>
+    );
+  }
+  const { status, intersection, union, perTable, warnings } = alignment;
+  const info = alignmentStatusInfo[status];
+  const unionStart = union.start;
+  const unionEnd = union.end;
+  const unionSpan = daysBetween(unionStart, unionEnd);
+  const headerText = (() => {
+    if (status === "incomplete") return "尚未上齐源表";
+    if (!unionStart || !unionEnd) return "无可用日期";
+    if (intersection.start && intersection.end) {
+      return `共同区间 ${intersection.start} ~ ${intersection.end}（并集 ${unionStart} ~ ${unionEnd}）`;
+    }
+    return `并集 ${unionStart} ~ ${unionEnd}（无共同区间）`;
+  })();
+
+  return (
+    <div className={`timeline timeline-${info.tone}`}>
+      <div className="timelineHeader">
+        <button
+          type="button"
+          className={`timelineBadge ${info.tone}`}
+          onClick={() => setOpen((value) => !value)}
+          title={info.hint}
+        >
+          时间线 · {info.label}
+          {warnings.length > 0 && <span className="timelineBadgeCount">{warnings.length}</span>}
+        </button>
+        <span className="timelineHeaderText">{headerText}</span>
+      </div>
+      <div className="timelineRows">
+        {timelineSlotOrder.map((slot) => {
+          const range = perTable[slot.id] || { start: "", end: "" };
+          const hasRange = Boolean(range.start && range.end && unionStart && unionEnd && unionSpan >= 0);
+          const offsetPercent = hasRange && unionSpan > 0 ? (daysBetween(unionStart, range.start) / unionSpan) * 100 : 0;
+          const lengthPercent = hasRange
+            ? unionSpan > 0
+              ? (Math.max(daysBetween(range.start, range.end), 0) / unionSpan) * 100
+              : 100
+            : 0;
+          const isectStart = intersection.start;
+          const isectEnd = intersection.end;
+          const hasIsect = Boolean(hasRange && isectStart && isectEnd && isectStart <= isectEnd);
+          const isectOffset = hasIsect && unionSpan > 0 ? (daysBetween(unionStart, isectStart) / unionSpan) * 100 : 0;
+          const isectLength = hasIsect && unionSpan > 0 ? (Math.max(daysBetween(isectStart, isectEnd), 0) / unionSpan) * 100 : 0;
+          return (
+            <div key={slot.id} className="timelineRow">
+              <span className="timelineLabel">{slot.label}</span>
+              <div className="timelineTrack">
+                {hasRange ? (
+                  <>
+                    <div
+                      className="timelineSpan"
+                      style={{ left: `${offsetPercent}%`, width: `${Math.max(lengthPercent, 1.2)}%` }}
+                    />
+                    {hasIsect && (
+                      <div
+                        className="timelineIntersect"
+                        style={{ left: `${isectOffset}%`, width: `${Math.max(isectLength, 0.6)}%` }}
+                      />
+                    )}
+                  </>
+                ) : (
+                  <div className="timelineSpan timelineSpanEmpty" />
+                )}
+              </div>
+              <span className="timelineRange">{range.start && range.end ? `${range.start} ~ ${range.end}` : "—"}</span>
+            </div>
+          );
+        })}
+      </div>
+      <div className="timelineAxis">
+        <span>{unionStart || "—"}</span>
+        <span>{unionEnd || "—"}</span>
+      </div>
+      {open && warnings.length > 0 && (
+        <ul className="timelineWarnings">
+          {warnings.map((warning, index) => (
+            <li key={`${warning.table}-${warning.kind}-${index}`}>{warning.message}</li>
+          ))}
+        </ul>
+      )}
+      {open && warnings.length === 0 && status === "aligned" && (
+        <div className="timelineWarnings timelineWarningsEmpty">5 张表起止日期完全一致，无需关注。</div>
+      )}
+    </div>
+  );
+}
+
 function SourcesView({ meta, onMetaChange }: { meta: Meta | null; onMetaChange: (meta: Meta) => void }) {
   const [files, setFiles] = React.useState<Record<string, File | null>>({});
   const [uploading, setUploading] = React.useState(false);
@@ -362,6 +502,7 @@ function SourcesView({ meta, onMetaChange }: { meta: Meta | null; onMetaChange: 
           </div>
           <span className="pill">{meta?.dataDir || "等待数据目录"}</span>
         </div>
+        <AlignmentTimeline alignment={meta?.alignment} />
         <DataTable rows={meta?.sources || []} columns={columns} pageSize={20} />
       </div>
     </section>

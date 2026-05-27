@@ -3,9 +3,17 @@ import path from "node:path";
 import { parse } from "csv-parse/sync";
 import XLSX from "xlsx";
 
-const dataDir = process.env.HUOPAN_DATA_DIR || "/Users/shaozhuang/Downloads/25年10月-26年1月whc";
+const dataDir = process.env.HUOPAN_DATA_DIR || path.resolve(process.cwd(), "data", "source-data");
 const uploadDir = process.env.HUOPAN_UPLOAD_DIR || path.resolve(process.cwd(), "uploads", "source-data");
 const clearedStateFile = path.join(uploadDir, ".sources-cleared");
+
+const sourceDateFields = {
+  product: "统计日期",
+  adItem: "日期",
+  content: "日期",
+  keyword: "日期",
+  crowd: "日期"
+};
 
 const sourceNames = {
   product: "店铺数据_商品维度",
@@ -205,17 +213,22 @@ function parseExcelDate(value) {
   return parseDateText(value);
 }
 
+async function safeRead(source, reader) {
+  if (source.cleared) return [];
+  if (!source.file) return [];
+  if (!(await fileExists(source.file))) return [];
+  return reader(source.file);
+}
+
 async function loadRaw() {
   if (rawCache) return rawCache;
   const sources = await resolveSourceFiles();
-  const readResolvedCsv = (source) => (source.cleared ? [] : readCsv(source.file));
-  const readResolvedProduct = (source) => (source.cleared ? [] : readProductWorkbook(source.file));
   const [product, adItem, content, keyword, crowd] = await Promise.all([
-    readResolvedProduct(sources.product),
-    readResolvedCsv(sources.adItem),
-    readResolvedCsv(sources.content),
-    readResolvedCsv(sources.keyword),
-    readResolvedCsv(sources.crowd)
+    safeRead(sources.product, readProductWorkbook),
+    safeRead(sources.adItem, readCsv),
+    safeRead(sources.content, readCsv),
+    safeRead(sources.keyword, readCsv),
+    safeRead(sources.crowd, readCsv)
   ]);
   rawCache = { product, adItem, content, keyword, crowd };
   return rawCache;
@@ -311,6 +324,106 @@ function enrichProductMetrics(row) {
   return row;
 }
 
+function diffDays(startIso, endIso) {
+  if (!startIso || !endIso) return 0;
+  const start = Date.parse(`${startIso}T00:00:00Z`);
+  const end = Date.parse(`${endIso}T00:00:00Z`);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return 0;
+  return Math.round((end - start) / 86400000);
+}
+
+const sourceLabels = {
+  product: "商品维度",
+  adItem: "推广商品",
+  content: "推广内容",
+  keyword: "推广关键词",
+  crowd: "推广人群"
+};
+
+export function computeAlignment(perTable) {
+  const tables = Object.entries(perTable).map(([id, range]) => ({
+    id,
+    label: sourceLabels[id] || id,
+    start: range.start || "",
+    end: range.end || ""
+  }));
+
+  const present = tables.filter((item) => item.start && item.end);
+  const missing = tables.filter((item) => !item.start || !item.end).map((item) => item.id);
+
+  if (!present.length) {
+    return {
+      status: "incomplete",
+      intersection: { start: "", end: "" },
+      union: { start: "", end: "" },
+      perTable: Object.fromEntries(tables.map((item) => [item.id, { start: item.start, end: item.end }])),
+      missing,
+      warnings: []
+    };
+  }
+
+  const intersectionStart = present.reduce((acc, item) => (item.start > acc ? item.start : acc), present[0].start);
+  const intersectionEnd = present.reduce((acc, item) => (item.end < acc ? item.end : acc), present[0].end);
+  const unionStart = present.reduce((acc, item) => (item.start < acc ? item.start : acc), present[0].start);
+  const unionEnd = present.reduce((acc, item) => (item.end > acc ? item.end : acc), present[0].end);
+
+  const hasIntersection = intersectionStart <= intersectionEnd;
+  const allSameStart = present.every((item) => item.start === present[0].start);
+  const allSameEnd = present.every((item) => item.end === present[0].end);
+
+  let status;
+  if (missing.length) status = "incomplete";
+  else if (allSameStart && allSameEnd) status = "aligned";
+  else if (hasIntersection) status = "partial";
+  else status = "mismatch";
+
+  const warnings = [];
+  if (status === "partial" || status === "mismatch") {
+    for (const item of present) {
+      if (item.start < intersectionStart) {
+        const days = diffDays(item.start, intersectionStart);
+        warnings.push({
+          table: item.id,
+          label: item.label,
+          kind: "extends_start",
+          diffDays: days,
+          message: `${item.label} 比共同区间多出前置 ${days} 天（${item.start} ~ ${intersectionStart}），这段时间其他表无对应数据`
+        });
+      }
+      if (item.end > intersectionEnd) {
+        const days = diffDays(intersectionEnd, item.end);
+        warnings.push({
+          table: item.id,
+          label: item.label,
+          kind: "extends_end",
+          diffDays: days,
+          message: `${item.label} 比共同区间多出后置 ${days} 天（${intersectionEnd} ~ ${item.end}），这段时间其他表无对应数据`
+        });
+      }
+    }
+  }
+  if (missing.length) {
+    for (const id of missing) {
+      warnings.push({
+        table: id,
+        label: sourceLabels[id] || id,
+        kind: "missing",
+        diffDays: 0,
+        message: `${sourceLabels[id] || id} 尚未上传或无有效日期`
+      });
+    }
+  }
+
+  return {
+    status,
+    intersection: hasIntersection ? { start: intersectionStart, end: intersectionEnd } : { start: "", end: "" },
+    union: { start: unionStart, end: unionEnd },
+    perTable: Object.fromEntries(tables.map((item) => [item.id, { start: item.start, end: item.end }])),
+    missing,
+    warnings
+  };
+}
+
 export async function buildMeta() {
   const sources = await resolveSourceFiles();
   const raw = await loadRaw();
@@ -326,17 +439,22 @@ export async function buildMeta() {
     dateField,
     ...dateRange(rows, dateField)
   });
+  const sourceList = [
+    sourceMeta("product", raw.product, sourceDateFields.product),
+    sourceMeta("adItem", raw.adItem, sourceDateFields.adItem),
+    sourceMeta("content", raw.content, sourceDateFields.content),
+    sourceMeta("keyword", raw.keyword, sourceDateFields.keyword),
+    sourceMeta("crowd", raw.crowd, sourceDateFields.crowd)
+  ];
+  const alignment = computeAlignment(
+    Object.fromEntries(sourceList.map((item) => [item.id, { start: item.start, end: item.end }]))
+  );
   return {
     dataDir,
     uploadDir,
     sourceDataCleared: Object.values(sources).some((source) => source.cleared),
-    sources: [
-      sourceMeta("product", raw.product, "统计日期"),
-      sourceMeta("adItem", raw.adItem, "日期"),
-      sourceMeta("content", raw.content, "日期"),
-      sourceMeta("keyword", raw.keyword, "日期"),
-      sourceMeta("crowd", raw.crowd, "日期")
-    ],
+    sources: sourceList,
+    alignment,
     scenes: uniqueScenes([...raw.adItem, ...raw.content, ...raw.keyword, ...raw.crowd]),
     scenesByView: {
       product: [],

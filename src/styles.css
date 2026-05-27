@@ -593,3 +593,203 @@ tbody tr:hover td {
     flex-direction: column;
   }
 }
+
+.timeline {
+  margin: 8px 0 18px;
+  padding: 14px 16px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(245, 200, 119, 0.18);
+  background: rgba(245, 200, 119, 0.04);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.timeline.timeline-ok {
+  border-color: rgba(120, 200, 130, 0.32);
+  background: rgba(120, 200, 130, 0.06);
+}
+.timeline.timeline-warn {
+  border-color: rgba(245, 200, 119, 0.42);
+  background: rgba(245, 200, 119, 0.07);
+}
+.timeline.timeline-danger {
+  border-color: rgba(229, 110, 96, 0.45);
+  background: rgba(229, 110, 96, 0.08);
+}
+.timeline.timeline-muted,
+.timeline.timelineEmpty {
+  border-color: rgba(245, 240, 223, 0.18);
+  background: rgba(245, 240, 223, 0.03);
+}
+
+.timelineHeader {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.timelineBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: rgba(245, 240, 223, 0.06);
+  color: #f5f0df;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+}
+.timelineBadge.ok {
+  color: #c1e8c4;
+  border-color: rgba(120, 200, 130, 0.6);
+  background: rgba(120, 200, 130, 0.18);
+}
+.timelineBadge.warn {
+  color: #f5d27d;
+  border-color: rgba(245, 200, 119, 0.65);
+  background: rgba(245, 200, 119, 0.18);
+}
+.timelineBadge.danger {
+  color: #f5b6ad;
+  border-color: rgba(229, 110, 96, 0.65);
+  background: rgba(229, 110, 96, 0.18);
+}
+.timelineBadge.muted {
+  color: #d8d2bd;
+  border-color: rgba(245, 240, 223, 0.32);
+  background: rgba(245, 240, 223, 0.08);
+}
+
+.timelineBadgeCount {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(16, 20, 12, 0.55);
+  color: inherit;
+  font-size: 11px;
+}
+
+.timelineHeaderText {
+  color: rgba(245, 240, 223, 0.78);
+  font-size: 13px;
+}
+
+.timelineRows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.timelineRow {
+  display: grid;
+  grid-template-columns: 92px 1fr 180px;
+  align-items: center;
+  gap: 12px;
+}
+
+.timelineLabel {
+  font-size: 12px;
+  color: rgba(245, 240, 223, 0.78);
+}
+
+.timelineTrack {
+  position: relative;
+  height: 12px;
+  border-radius: 6px;
+  background: rgba(245, 240, 223, 0.05);
+  overflow: hidden;
+}
+
+.timelineSpan {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(245, 200, 119, 0.32);
+  border-radius: 4px;
+}
+
+.timelineSpanEmpty {
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(245, 240, 223, 0.06),
+    rgba(245, 240, 223, 0.06) 4px,
+    transparent 4px,
+    transparent 8px
+  );
+  left: 0;
+  right: 0;
+}
+
+.timelineIntersect {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(120, 200, 130, 0.55);
+  border-radius: 4px;
+  box-shadow: 0 0 0 1px rgba(120, 200, 130, 0.4) inset;
+}
+
+.timelineRange {
+  font-size: 11px;
+  color: rgba(245, 240, 223, 0.6);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.timelineAxis {
+  display: flex;
+  justify-content: space-between;
+  margin-left: 104px;
+  margin-right: 192px;
+  font-size: 11px;
+  color: rgba(245, 240, 223, 0.45);
+  font-variant-numeric: tabular-nums;
+}
+
+.timelineWarnings {
+  margin: 4px 0 0;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: rgba(16, 20, 12, 0.45);
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: rgba(245, 240, 223, 0.88);
+}
+
+.timelineWarnings li::before {
+  content: "·";
+  display: inline-block;
+  margin-right: 6px;
+  color: rgba(245, 200, 119, 0.7);
+}
+
+.timelineWarningsEmpty {
+  color: rgba(245, 240, 223, 0.65);
+  font-style: italic;
+}
+
+@media (max-width: 960px) {
+  .timelineRow {
+    grid-template-columns: 80px 1fr;
+  }
+  .timelineRange {
+    grid-column: 2 / 3;
+    text-align: left;
+    padding-left: 0;
+  }
+  .timelineAxis {
+    margin-left: 92px;
+    margin-right: 0;
+  }
+}
