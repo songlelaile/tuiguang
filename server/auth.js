@@ -60,9 +60,28 @@ export function ensureUserTables(db) {
       note TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS sms_codes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      phone TEXT NOT NULL,
+      code TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      used INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+    CREATE INDEX IF NOT EXISTS idx_sms_codes_phone ON sms_codes(phone);
+    CREATE INDEX IF NOT EXISTS idx_sms_codes_expires ON sms_codes(expires_at);
   `);
+
+  // P4.1 增量:users 加 phone 列(若不存在),并建 partial unique index 允许多个 NULL 但非 NULL 唯一
+  const cols = db.prepare(`PRAGMA table_info(users)`).all();
+  if (!cols.some((c) => c.name === "phone")) {
+    db.exec(`ALTER TABLE users ADD COLUMN phone TEXT`);
+    console.log("[auth] users 表已新增 phone 列");
+  }
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_unique ON users(phone) WHERE phone IS NOT NULL`);
 }
 
 // ---- 密码 ----
@@ -102,7 +121,7 @@ export function getSessionUser(db, token) {
   const row = db
     .prepare(
       `SELECT s.token, s.expires_at, s.user_id,
-              u.id, u.username, u.email, u.role, u.status
+              u.id, u.username, u.email, u.phone, u.role, u.status
        FROM sessions s
        JOIN users u ON u.id = s.user_id
        WHERE s.token = ?`
@@ -118,7 +137,7 @@ export function getSessionUser(db, token) {
   const nowIso = new Date().toISOString();
   db.prepare(`UPDATE sessions SET last_seen_at = ? WHERE token = ?`).run(nowIso, token);
   db.prepare(`UPDATE users SET last_seen_at = ? WHERE id = ?`).run(nowIso, row.user_id);
-  return { id: row.id, username: row.username, email: row.email, role: row.role, status: row.status };
+  return { id: row.id, username: row.username, email: row.email, phone: row.phone, role: row.role, status: row.status };
 }
 
 export function destroySession(db, token) {
@@ -251,6 +270,7 @@ export function deleteInvite(db, code) {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const USERNAME_RE = /^[A-Za-z0-9_一-龥][\w一-龥.-]{1,30}$/;
+const PHONE_RE = /^1[3-9]\d{9}$/; // 中国大陆手机号
 
 export function validateUsername(name) {
   if (typeof name !== "string") return "用户名必填";
@@ -273,15 +293,26 @@ export function validateEmail(email) {
   return null;
 }
 
-export function createUser(db, { username, email, password, role = "user" }) {
-  const hash = hashPassword(password);
+export function validatePhone(phone) {
+  if (typeof phone !== "string") return "请输入手机号";
+  const trimmed = phone.trim();
+  if (!trimmed) return "请输入手机号";
+  if (!PHONE_RE.test(trimmed)) return "手机号格式不正确(11 位中国大陆号码)";
+  return null;
+}
+
+export function createUser(db, { username, email, phone, password, role = "user" }) {
+  // 至少有 password 或 phone 中一个(纯 SMS 用户没有密码,用随机不可登的 hash 占位)
+  const hash = password ? hashPassword(password) : hashPassword(crypto.randomBytes(16).toString("hex"));
   const stmt = db.prepare(
-    `INSERT INTO users(username, email, password_hash, role, status, created_at)
-     VALUES (?, ?, ?, ?, 'active', ?)`
+    `INSERT INTO users(username, email, phone, password_hash, role, status, created_at)
+     VALUES (?, ?, ?, ?, ?, 'active', ?)`
   );
+  const cleanPhone = phone && String(phone).trim() ? String(phone).trim() : null;
   const result = stmt.run(
     username.trim(),
     email && email.trim() ? email.trim() : null,
+    cleanPhone,
     hash,
     role,
     new Date().toISOString()
@@ -290,9 +321,88 @@ export function createUser(db, { username, email, password, role = "user" }) {
     id: Number(result.lastInsertRowid),
     username: username.trim(),
     email: email && email.trim() ? email.trim() : null,
+    phone: cleanPhone,
     role,
     status: "active"
   };
+}
+
+export function getUserByPhone(db, phone) {
+  if (!phone) return null;
+  return db.prepare(`SELECT * FROM users WHERE phone = ?`).get(String(phone).trim());
+}
+
+// ---- SMS 验证码 ----
+const SMS_TTL_MS = 10 * 60 * 1000;
+const SMS_RESEND_COOLDOWN_MS = 60 * 1000;
+const SMS_DAILY_LIMIT = 10;
+
+export function checkSmsRateLimit(db, phone) {
+  const lastSend = db
+    .prepare(`SELECT created_at FROM sms_codes WHERE phone = ? ORDER BY id DESC LIMIT 1`)
+    .get(phone);
+  if (lastSend) {
+    const elapsed = Date.now() - new Date(lastSend.created_at).getTime();
+    if (elapsed < SMS_RESEND_COOLDOWN_MS) {
+      const remain = Math.ceil((SMS_RESEND_COOLDOWN_MS - elapsed) / 1000);
+      return { ok: false, reason: `请 ${remain} 秒后再请求验证码` };
+    }
+  }
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  const dailyCount = db
+    .prepare(`SELECT COUNT(*) AS n FROM sms_codes WHERE phone = ? AND created_at >= ?`)
+    .get(phone, startOfDay.toISOString());
+  if (dailyCount.n >= SMS_DAILY_LIMIT) {
+    return { ok: false, reason: "今日请求次数已达上限,请明天再试" };
+  }
+  return { ok: true };
+}
+
+export function generateSmsCode() {
+  // 6 位数字,避开 000000 / 全相同
+  let code;
+  do {
+    code = crypto.randomInt(100000, 1000000).toString();
+  } while (/^(\d)\1{5}$/.test(code));
+  return code;
+}
+
+export function recordSmsCode(db, phone, code) {
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + SMS_TTL_MS);
+  db.prepare(
+    `INSERT INTO sms_codes(phone, code, expires_at, used, created_at) VALUES (?, ?, ?, 0, ?)`
+  ).run(phone, code, expiresAt.toISOString(), now.toISOString());
+}
+
+export function verifySmsCode(db, phone, code) {
+  if (!phone || !code) return { ok: false, reason: "请输入验证码" };
+  // 找最新未用、未过期的;只允许验证最新那条以防绕过
+  const row = db
+    .prepare(
+      `SELECT id, code, expires_at, used FROM sms_codes WHERE phone = ? ORDER BY id DESC LIMIT 1`
+    )
+    .get(phone);
+  if (!row) return { ok: false, reason: "请先获取验证码" };
+  if (row.used) return { ok: false, reason: "验证码已使用,请重新获取" };
+  if (new Date(row.expires_at).getTime() < Date.now()) return { ok: false, reason: "验证码已过期" };
+  if (String(row.code) !== String(code).trim()) return { ok: false, reason: "验证码不正确" };
+  db.prepare(`UPDATE sms_codes SET used = 1 WHERE id = ?`).run(row.id);
+  return { ok: true };
+}
+
+// 给 SMS 自动注册用户起一个不冲突的用户名
+export function generatePhoneUsername(db, phone) {
+  const tail = String(phone).slice(-4);
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const suffix = attempt === 0 ? "" : `_${crypto.randomBytes(2).toString("hex")}`;
+    const name = `u${tail}${suffix}`;
+    const exists = db.prepare(`SELECT id FROM users WHERE username = ? COLLATE NOCASE`).get(name);
+    if (!exists) return name;
+  }
+  // 极端情况:用随机 hex
+  return `u_${crypto.randomBytes(4).toString("hex")}`;
 }
 
 export function getUserByUsername(db, username) {

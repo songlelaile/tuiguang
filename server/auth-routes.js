@@ -3,25 +3,39 @@
 import express from "express";
 import {
   SESSION_COOKIE_NAME,
+  checkSmsRateLimit,
   clearSessionCookie,
   createSession,
   createUser,
   destroySession,
+  generatePhoneUsername,
+  generateSmsCode,
+  getUserByPhone,
   getUserByUsername,
+  recordSmsCode,
   redeemInvite,
   setSessionCookie,
   validateEmail,
   validatePassword,
+  validatePhone,
   validateUsername,
-  verifyPassword
+  verifyPassword,
+  verifySmsCode
 } from "./auth.js";
+import { issueCaptcha, verifyCaptcha } from "./captcha.js";
+import { activeProvider, sendSms } from "./sms.js";
 
 export function createAuthRouter(getDb) {
   const router = express.Router();
 
+  // GET /api/auth/captcha — 取一道算术题,前端把答案 + id 回带
+  router.get("/captcha", (_req, res) => {
+    res.json(issueCaptcha());
+  });
+
   router.post("/register", (req, res) => {
     const db = getDb();
-    const { username, password, email, invite_code } = req.body || {};
+    const { username, password, email, invite_code, captcha_id, captcha_answer } = req.body || {};
 
     const usernameErr = validateUsername(username);
     if (usernameErr) return res.status(400).json({ error: usernameErr });
@@ -29,8 +43,15 @@ export function createAuthRouter(getDb) {
     if (passwordErr) return res.status(400).json({ error: passwordErr });
     const emailErr = validateEmail(email);
     if (emailErr) return res.status(400).json({ error: emailErr });
-    if (typeof invite_code !== "string" || !invite_code.trim()) {
-      return res.status(400).json({ error: "请输入邀请码" });
+
+    // 开放注册:不再强制 invite_code;但如果给了就走核销逻辑(便于内部追踪/受控分发)
+    const usingInvite = typeof invite_code === "string" && invite_code.trim().length > 0;
+
+    // 没用邀请码时,必须过验证码
+    if (!usingInvite) {
+      if (!verifyCaptcha(captcha_id, captcha_answer)) {
+        return res.status(400).json({ error: "验证码不正确或已过期,请刷新重试" });
+      }
     }
 
     if (getUserByUsername(db, username)) {
@@ -45,10 +66,11 @@ export function createAuthRouter(getDb) {
 
     let user;
     try {
-      // 用事务把"核销邀请码"和"建用户"做原子,失败一起回滚
       const txn = db.transaction(() => {
-        const redeem = redeemInvite(db, invite_code.trim());
-        if (!redeem.ok) throw new Error(`INVITE:${redeem.reason}`);
+        if (usingInvite) {
+          const redeem = redeemInvite(db, invite_code.trim());
+          if (!redeem.ok) throw new Error(`INVITE:${redeem.reason}`);
+        }
         return createUser(db, { username, email, password, role: "user" });
       });
       user = txn();
@@ -89,6 +111,58 @@ export function createAuthRouter(getDb) {
     destroySession(db, token);
     clearSessionCookie(req, res);
     res.json({ ok: true });
+  });
+
+  // ---- P4.1 手机号 + SMS 登录 ----
+
+  router.post("/sms/send", async (req, res, next) => {
+    const db = getDb();
+    const { phone } = req.body || {};
+    const phoneErr = validatePhone(phone);
+    if (phoneErr) return res.status(400).json({ error: phoneErr });
+    const trimmedPhone = phone.trim();
+
+    const rate = checkSmsRateLimit(db, trimmedPhone);
+    if (!rate.ok) return res.status(429).json({ error: rate.reason });
+
+    const code = generateSmsCode();
+    recordSmsCode(db, trimmedPhone, code);
+    try {
+      await sendSms({ phone: trimmedPhone, code });
+    } catch (e) {
+      console.error("[sms] send failed:", e.message);
+      return res.status(502).json({ error: `验证码发送失败:${e.message}` });
+    }
+    // dev provider 把 code 也返回(便于本地测试),生产 provider 永远不返回 code
+    const provider = activeProvider();
+    res.json({ ok: true, provider, ...(provider === "dev" ? { devCode: code } : {}) });
+  });
+
+  router.post("/sms/login", (req, res) => {
+    const db = getDb();
+    const { phone, code } = req.body || {};
+    const phoneErr = validatePhone(phone);
+    if (phoneErr) return res.status(400).json({ error: phoneErr });
+    const trimmedPhone = phone.trim();
+
+    const verify = verifySmsCode(db, trimmedPhone, code);
+    if (!verify.ok) return res.status(400).json({ error: verify.reason });
+
+    let user = getUserByPhone(db, trimmedPhone);
+    if (!user) {
+      // 自动注册:用户名 = "u<phone-tail4>";SMS-only 用户没有密码,createUser 写随机不可登 hash
+      const username = generatePhoneUsername(db, trimmedPhone);
+      const created = createUser(db, { username, phone: trimmedPhone, password: null, role: "user" });
+      user = { ...created, password_hash: null };
+    } else if (user.status !== "active") {
+      return res.status(403).json({ error: "账号已被禁用" });
+    }
+
+    const session = createSession(db, user.id);
+    setSessionCookie(req, res, session.token, session.expiresAt);
+    res.json({
+      user: { id: user.id, username: user.username, email: user.email, phone: user.phone, role: user.role, status: user.status }
+    });
   });
 
   // 注意:GET /me 不在这里挂,因为它需要 requireAuth 中间件;
