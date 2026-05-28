@@ -13,8 +13,10 @@
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.0",
     "archiver": "^8.0.0",
+    "bcryptjs": "^3.0.3",
     "better-sqlite3": "^12.10.0",
     "concurrently": "^9.2.1",
+    "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "csv-parse": "^6.1.0",
     "csv-stringify": "^6.7.0",

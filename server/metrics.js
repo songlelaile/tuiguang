@@ -3,9 +3,25 @@ import path from "node:path";
 import { parse } from "csv-parse/sync";
 import XLSX from "xlsx";
 
-const dataDir = process.env.HUOPAN_DATA_DIR || path.resolve(process.cwd(), "data", "source-data");
-const uploadDir = process.env.HUOPAN_UPLOAD_DIR || path.resolve(process.cwd(), "uploads", "source-data");
-const clearedStateFile = path.join(uploadDir, ".sources-cleared");
+// 多租户:每个 user 的上传文件落在 ROOT_UPLOAD_DIR/{userId}/ 下
+// ROOT_DATA_DIR 保留只是给 buildMeta 报告路径用,**不再**作为新用户的默认源数据(新用户看空数据)
+const ROOT_DATA_DIR = process.env.HUOPAN_DATA_DIR || path.resolve(process.cwd(), "data", "source-data");
+const ROOT_UPLOAD_DIR = process.env.HUOPAN_UPLOAD_DIR || path.resolve(process.cwd(), "uploads", "source-data");
+
+function requireUserId(userId) {
+  if (typeof userId !== "number" || !Number.isInteger(userId) || userId <= 0) {
+    throw new Error(`metrics: 缺失 userId(收到 ${userId})`);
+  }
+  return userId;
+}
+
+function userUploadDir(userId) {
+  return path.join(ROOT_UPLOAD_DIR, String(requireUserId(userId)));
+}
+
+function clearedStateFileFor(userId) {
+  return path.join(userUploadDir(userId), ".sources-cleared");
+}
 
 const sourceDateFields = {
   product: "统计日期",
@@ -31,7 +47,8 @@ export const sourceUploadSlots = [
   { id: "crowd", name: sourceNames.crowd, defaultFile: "推广人群报表_20260118_130755.csv", uploadFile: "crowd.csv", extensions: [".csv"] }
 ];
 
-let rawCache;
+// 多租户缓存:key = userId,value = { product, adItem, content, keyword, crowd }
+const rawCacheByUser = new Map();
 
 async function fileExists(filePath) {
   try {
@@ -42,46 +59,52 @@ async function fileExists(filePath) {
   }
 }
 
-function defaultSourcePath(slot) {
-  return path.join(dataDir, slot.defaultFile);
+export function getUploadDir(userId) {
+  return userUploadDir(userId);
 }
 
-export function getUploadDir() {
-  return uploadDir;
+export function getRootUploadDir() {
+  return ROOT_UPLOAD_DIR;
 }
 
-export function getUploadedSourcePath(sourceId) {
+export function getUploadedSourcePath(userId, sourceId) {
   const slot = sourceUploadSlots.find((item) => item.id === sourceId);
   if (!slot) throw new Error(`Unknown source id: ${sourceId}`);
-  return path.join(uploadDir, slot.uploadFile);
+  return path.join(userUploadDir(userId), slot.uploadFile);
 }
 
-export function resetRawCache() {
-  rawCache = undefined;
+export function resetRawCache(userId) {
+  if (userId === undefined) {
+    rawCacheByUser.clear();
+  } else {
+    rawCacheByUser.delete(requireUserId(userId));
+  }
 }
 
-export async function clearSourceData() {
-  await fs.rm(uploadDir, { recursive: true, force: true });
-  await fs.mkdir(uploadDir, { recursive: true });
-  await fs.writeFile(clearedStateFile, new Date().toISOString(), "utf8");
-  resetRawCache();
+export async function clearSourceData(userId) {
+  const uid = requireUserId(userId);
+  const dir = userUploadDir(uid);
+  await fs.rm(dir, { recursive: true, force: true });
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(clearedStateFileFor(uid), new Date().toISOString(), "utf8");
+  resetRawCache(uid);
 }
 
-async function resolveSourceFiles() {
-  const sourceDataCleared = await fileExists(clearedStateFile);
+// 多租户:新用户没有"默认 demo 数据",未上传即为空
+async function resolveSourceFiles(userId) {
+  const uid = requireUserId(userId);
   const entries = await Promise.all(
     sourceUploadSlots.map(async (slot) => {
-      const uploadedPath = getUploadedSourcePath(slot.id);
+      const uploadedPath = path.join(userUploadDir(uid), slot.uploadFile);
       const uploaded = await fileExists(uploadedPath);
-      const mode = uploaded ? "uploaded" : sourceDataCleared ? "empty" : "default";
       return [
         slot.id,
         {
           ...slot,
-          file: mode === "empty" ? "" : uploaded ? uploadedPath : defaultSourcePath(slot),
+          file: uploaded ? uploadedPath : "",
           uploaded,
-          mode,
-          cleared: mode === "empty"
+          mode: uploaded ? "uploaded" : "empty",
+          cleared: !uploaded
         }
       ];
     })
@@ -221,13 +244,15 @@ async function safeRead(source, reader) {
 }
 
 // P1.2 暴露 raw 数据快照给历史库入库流程
-export async function getRawSnapshot() {
-  return loadRaw();
+export async function getRawSnapshot(userId) {
+  return loadRaw(userId);
 }
 
-async function loadRaw() {
-  if (rawCache) return rawCache;
-  const sources = await resolveSourceFiles();
+async function loadRaw(userId) {
+  const uid = requireUserId(userId);
+  const cached = rawCacheByUser.get(uid);
+  if (cached) return cached;
+  const sources = await resolveSourceFiles(uid);
   const [product, adItem, content, keyword, crowd] = await Promise.all([
     safeRead(sources.product, readProductWorkbook),
     safeRead(sources.adItem, readCsv),
@@ -235,8 +260,9 @@ async function loadRaw() {
     safeRead(sources.keyword, readCsv),
     safeRead(sources.crowd, readCsv)
   ]);
-  rawCache = { product, adItem, content, keyword, crowd };
-  return rawCache;
+  const raw = { product, adItem, content, keyword, crowd };
+  rawCacheByUser.set(uid, raw);
+  return raw;
 }
 
 function addToGroup(map, key, initial, merge) {
@@ -512,9 +538,10 @@ export function computeAlignment(perTable) {
   };
 }
 
-export async function buildMeta() {
-  const sources = await resolveSourceFiles();
-  const raw = await loadRaw();
+export async function buildMeta(userId) {
+  const uid = requireUserId(userId);
+  const sources = await resolveSourceFiles(uid);
+  const raw = await loadRaw(uid);
   const uniqueScenes = (rows) => [...new Set(rows.map((row) => row["场景名字"]).filter(Boolean))].sort();
   const sourceMeta = (id, rows, dateField) => ({
     id,
@@ -538,9 +565,9 @@ export async function buildMeta() {
     Object.fromEntries(sourceList.map((item) => [item.id, { start: item.start, end: item.end }]))
   );
   return {
-    dataDir,
-    uploadDir,
-    sourceDataCleared: Object.values(sources).some((source) => source.cleared),
+    dataDir: ROOT_DATA_DIR,
+    uploadDir: userUploadDir(uid),
+    sourceDataCleared: Object.values(sources).every((source) => source.cleared),
     sources: sourceList,
     alignment,
     scenes: uniqueScenes([...raw.adItem, ...raw.content, ...raw.keyword, ...raw.crowd]),
@@ -555,8 +582,8 @@ export async function buildMeta() {
   };
 }
 
-export async function buildProductView(range = {}) {
-  const { product, adItem, content } = await loadRaw();
+export async function buildProductView(userId, range = {}) {
+  const { product, adItem, content } = await loadRaw(userId);
   const rows = filterRows(product, range, "统计日期", ["商品名称", "商品标题", "商品ID"]);
 
   // 全店推广花费：从推广商品报表 + 推广内容报表的"花费"按日期聚合
@@ -813,8 +840,8 @@ function buildAdSubject(rows) {
 
 const adFields = ["花费", "总成交金额", "展现量", "点击量", "总成交笔数", "间接成交笔数", "总购物车数", "引导访问潜客数", "引导访问人数"];
 
-export async function buildAdProductsView(range = {}) {
-  const raw = await loadRaw();
+export async function buildAdProductsView(userId, range = {}) {
+  const raw = await loadRaw(userId);
   const rows = filterRows(adUnion(raw), range, "日期", ["主体名称", "计划名字", "场景名字"]);
   const subjects = buildAdSubject(rows);
 
@@ -880,8 +907,8 @@ export async function buildAdProductsView(range = {}) {
   };
 }
 
-export async function buildKeywordView(range = {}) {
-  const raw = await loadRaw();
+export async function buildKeywordView(userId, range = {}) {
+  const raw = await loadRaw(userId);
   const rows = filterRows(raw.keyword, range, "日期", ["词名字/词包名字", "宝贝名称", "计划名字"]);
   const groups = new Map();
   const wordGroups = new Map();
@@ -939,8 +966,8 @@ export async function buildKeywordView(range = {}) {
   };
 }
 
-export async function buildCrowdView(range = {}) {
-  const raw = await loadRaw();
+export async function buildCrowdView(userId, range = {}) {
+  const raw = await loadRaw(userId);
   const rows = filterRows(raw.crowd, range, "日期", ["人群名字", "主体名称", "单元名字", "场景名字"]);
   const groups = new Map();
   const sceneWords = new Map();
@@ -991,8 +1018,8 @@ export async function buildCrowdView(range = {}) {
   };
 }
 
-export async function buildContentView(range = {}) {
-  const raw = await loadRaw();
+export async function buildContentView(userId, range = {}) {
+  const raw = await loadRaw(userId);
   const rows = filterRows(raw.content, range, "日期", ["主体名称", "计划名字", "主体类型"]);
   const groups = new Map();
   for (const row of rows) {

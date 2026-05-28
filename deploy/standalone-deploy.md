@@ -7,7 +7,7 @@
 
 如果你想挂在已有主域名下做子站（如 `tuiguang.shaozhuangai.com`），改看 [host-nginx-deploy.md](host-nginx-deploy.md)。
 
-访问控制：**内网 + Nginx Basic Auth**（HTTPS 暂不开启，反代层后期可补 certbot）。
+访问控制：**应用层 cookie session 登录 + 邀请码注册**(从 P4 起,nginx 不再做 Basic Auth)。HTTPS 暂不开启,反代层后期可补 certbot。
 
 ---
 
@@ -17,7 +17,6 @@
 
 - Docker Engine 24+
 - Docker Compose Plugin v2（`docker compose version` 能输出版本即可）
-- `htpasswd` 命令（来自 `apache2-utils` / `httpd-tools`）；没有也可以用 Docker 临时生成，见步骤 3
 
 ---
 
@@ -43,52 +42,54 @@ nano .env
 ```dotenv
 APP_PORT=80
 UPLOADS_HOST_DIR=/var/lib/tuiguang/uploads
+DATA_HOST_DIR=/var/lib/tuiguang/data
 UPLOAD_MAX_MB=100
 TZ=Asia/Shanghai
+
+# 首次部署:引导首个管理员账号(只在 users 表为空时生效;创建后建议清掉密码)
+ADMIN_BOOTSTRAP_USERNAME=admin
+ADMIN_BOOTSTRAP_PASSWORD=<改成 12 位以上强密码>
+SESSION_TTL_DAYS=14
 ```
 
 ```bash
-sudo mkdir -p /var/lib/tuiguang/uploads
-sudo chown 1000:1000 /var/lib/tuiguang/uploads   # 容器内 node 用户 UID 1000
+sudo mkdir -p /var/lib/tuiguang/uploads /var/lib/tuiguang/data
+sudo chown -R 1000:1000 /var/lib/tuiguang   # 容器内 node 用户 UID 1000
 ```
 
-## 3. 生成 Basic Auth 口令文件
-
-```bash
-# 方式 A：本机有 htpasswd
-htpasswd -cbB docker/htpasswd admin '替换为强密码'
-htpasswd -bB  docker/htpasswd viewer '另一个强密码'   # 追加用户（可选）
-
-# 方式 B：没有 htpasswd，用 Docker 临时生成
-docker run --rm httpd:2.4-alpine htpasswd -nbB admin '替换为强密码' > docker/htpasswd
-
-chmod 600 docker/htpasswd
-```
-
-> 密码建议 12 位以上，含大小写 + 数字 + 符号。`-B` 表示用 bcrypt，不要省略。
-
-## 4. 启动
+## 3. 启动
 
 ```bash
 docker compose --profile standalone up -d --build
 docker compose ps
+docker compose logs app | grep -E '\[auth\]|\[migration\]'
+# 应看到 [auth] 已创建首个管理员: admin (id=1)
 ```
 
-预期输出两个服务都是 `running (healthy)`。
+预期输出两个服务(app + nginx)都是 `running (healthy)`。
 
-## 5. 验证
+## 4. 验证
 
 ```bash
-# 健康检查（不需要鉴权，nginx 已放行）
+# 健康检查直通
 curl -fsS http://127.0.0.1/api/health
 
-# 带鉴权访问首页
-curl -u admin:'你的密码' http://127.0.0.1/
+# 应用层登录拿 session cookie
+curl -c /tmp/sess.txt -X POST http://127.0.0.1/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"<你的密码>"}'
 
-# 浏览器访问 http://服务器内网IP/  → 弹 Basic Auth → 看到 BI 首页
+# 带 cookie 访问 /api/auth/me 应 200
+curl -fsS -b /tmp/sess.txt http://127.0.0.1/api/auth/me
+
+# 浏览器访问 http://服务器内网IP/  → 看到登录页 → 用 admin/你的密码 登录
 ```
 
-进入"源数据"页面，上传 5 张生意参谋导出表，下方**时间线**面板会显示对齐状态。
+进入"源数据"页面，上传 5 张生意参谋导出表，下方**时间线**面板会显示对齐状态。新用户开通:管理员后台 → 生成邀请码 → 把链接发给同事。
+
+## 5. 收尾 bootstrap 凭据
+
+确认能登录后,把 `.env` 里的 `ADMIN_BOOTSTRAP_PASSWORD` 留空或注释掉,然后 `docker compose --profile standalone up -d` 让进程重新读 env。密码已经哈希入库,清掉 env 不影响登录。
 
 ---
 
@@ -156,7 +157,8 @@ docker compose restart app
 | 现象 | 排查 |
 |---|---|
 | 浏览器一直转圈 | `docker compose logs nginx` `docker compose logs app` |
-| 弹了 Basic Auth 但密码对的也不通过 | `docker/htpasswd` 没用 `-B`（bcrypt），重新生成 |
+| `[startup] DB 初始化失败` "检测到旧版业务数据" | 升级老库时 `ADMIN_BOOTSTRAP_USERNAME/PASSWORD` 没设;补 env 后 `docker compose --profile standalone up -d` 重启 |
+| 登录页 "用户名或密码错误" | `docker compose logs app \| grep '\[auth\]'`;若看到 "users 表为空" 警告,说明 bootstrap 没跑成功,补 env 重启 |
 | 上传文件 413 | nginx `client_max_body_size` 没改到位 |
 | 上传卡死然后 502 | `proxy_read_timeout` 不够大，或者 `UPLOAD_MAX_MB` 小于实际文件 |
 | 时间线总是 incomplete | 5 个槽位的文件还没上齐；或者某 csv 编码不是 GB18030 |
