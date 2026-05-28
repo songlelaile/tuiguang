@@ -554,7 +554,7 @@ function ProductView({ data }: { data: AnyRecord }) {
           actionLabel="点击下钻: 分日走势"
           onClick={() => setDrilldown((prev) => (prev === "payDaily" ? null : "payDaily"))}
         />
-        <MetricCard label="TOP1 支付占比" value={fmtPercent(summary.topShare)} />
+        <MetricCard label="全店退款金额占比" value={fmtPercent(summary.refundRatio)} />
         <MetricCard
           label="全店净费比"
           value={fmtPercent(summary.netFeeRatio)}

@@ -593,9 +593,11 @@ export async function buildProductView(range = {}) {
       rows: rows.length,
       groups: table.length,
       totalPay: round(totalPay, 2),
+      totalRefund: round(totalRefund, 2),
       totalSpend: round(totalAdSpend, 2),
       productTableSpend: round(totalSpend, 2),
       topShare: table[0] ? round(div(table[0].pay, totalPay), 4) : null,
+      refundRatio: round(div(totalRefund, totalPay), 4),
       netFeeRatio: round(div(totalAdSpend, totalPay - totalRefund), 4),
       spendSource: "adUnion"
     },
