@@ -299,6 +299,89 @@ function enrichAdMetrics(row) {
   return row;
 }
 
+// P3.2 智能异常：扫描 daily 数组，每行附加 flags[]、anomalous（保留向后兼容）
+// flags 元素结构 { kind, severity: "warning"|"info", label, hint }
+function detectProductDailyAnomalies(daily) {
+  // 7 日均值（rolling）作为对比基线
+  const win = 7;
+  const spends = daily.map((d) => cleanNumber(d["推广消耗"]));
+  const pays = daily.map((d) => cleanNumber(d["支付金额"]));
+  function rollingAvg(arr, idx) {
+    const start = Math.max(0, idx - win + 1);
+    const slice = arr.slice(start, idx + 1);
+    if (!slice.length) return 0;
+    return slice.reduce((a, b) => a + b, 0) / slice.length;
+  }
+  for (let i = 0; i < daily.length; i++) {
+    const row = daily[i];
+    const flags = [];
+    const pay = cleanNumber(row["支付金额"]);
+    const refund = cleanNumber(row["成功退款金额"]);
+    const spend = cleanNumber(row["推广消耗"]);
+    const netFee = typeof row.netFeeRatio === "number" ? row.netFeeRatio : null;
+
+    if (pay > 0 && refund > pay) {
+      flags.push({
+        kind: "refund_exceeds_pay",
+        severity: "warning",
+        label: "退款超出支付",
+        hint: `退款 ${refund.toFixed(2)} > 支付 ${pay.toFixed(2)}，常因前几日订单的退款集中在当天结算`
+      });
+    }
+    if (netFee !== null && Math.abs(netFee) > 1) {
+      flags.push({
+        kind: "net_fee_extreme",
+        severity: "warning",
+        label: "净费比绝对值 > 100%",
+        hint: `净费比 ${(netFee * 100).toFixed(0)}%，分母（净支付）可能很小或为负，请结合退款率综合判断`
+      });
+    }
+    // spend 突变（仅 i >= 3 有意义；至少要有几天历史才能算均值）
+    if (i >= 3) {
+      const avg = rollingAvg(spends, i - 1); // 不含当日
+      if (avg > 100) {
+        if (spend > avg * 2) {
+          flags.push({
+            kind: "spend_spike",
+            severity: "info",
+            label: "推广花费突增",
+            hint: `当日 ${spend.toFixed(2)}，前 ${win} 日均值 ${avg.toFixed(2)}，增幅 ${((spend / avg - 1) * 100).toFixed(0)}%`
+          });
+        } else if (spend < avg * 0.4) {
+          flags.push({
+            kind: "spend_drop",
+            severity: "info",
+            label: "推广花费骤降",
+            hint: `当日 ${spend.toFixed(2)}，前 ${win} 日均值 ${avg.toFixed(2)}，降幅 ${((1 - spend / avg) * 100).toFixed(0)}%`
+          });
+        }
+      }
+      // 支付突变
+      const payAvg = rollingAvg(pays, i - 1);
+      if (payAvg > 1000 && pay > 0) {
+        if (pay > payAvg * 2.5) {
+          flags.push({
+            kind: "pay_spike",
+            severity: "info",
+            label: "当日支付突增",
+            hint: `当日 ${pay.toFixed(0)}，前 ${win} 日均值 ${payAvg.toFixed(0)}`
+          });
+        }
+      }
+    }
+
+    if (flags.length > 0) {
+      row.flags = flags;
+      row.anomalous = true;
+      row.anomalyKind = flags[0].kind;
+      row.anomalyHint = flags[0].hint;
+    } else {
+      row.flags = [];
+      row.anomalous = false;
+    }
+  }
+}
+
 function filterRows(rows, range, dateField, textFields = []) {
   return rows.filter((row) => {
     if (!inRange(row, range, dateField)) return false;
@@ -643,21 +726,11 @@ export async function buildProductView(range = {}) {
   }
   const daily = [...dayGroups.values()]
     .map(enrichProductMetrics)
-    .map((row) => {
-      // 标记单日异常：退款金额 > 支付金额（净支付为负，net 费比因此变成大负数）
-      // 通常是退款滞后入账造成的口径错位，非真实业务恶化
-      const pay = cleanNumber(row["支付金额"]);
-      const refund = cleanNumber(row["成功退款金额"]);
-      if (pay > 0 && refund > pay) {
-        row.anomalous = true;
-        row.anomalyKind = "refund_exceeds_pay";
-        row.anomalyHint = "退款金额 > 支付金额，单日净费比受滞后退款冲账影响，建议结合 7 日均线观察";
-      } else {
-        row.anomalous = false;
-      }
-      return row;
-    })
     .sort((a, b) => String(a.sortKey).localeCompare(String(b.sortKey)));
+
+  // P3.2 智能异常检测：对每条 daily 打 flags 数组
+  // 检测窗口 = 该日的前 7 日均值；偏离 > 阈值即标 flag
+  detectProductDailyAnomalies(daily);
 
   return {
     summary: {

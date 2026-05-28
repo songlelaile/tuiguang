@@ -999,6 +999,41 @@ tbody tr:hover td {
   color: #f5d27d;
 }
 
+/* P3.1 多指标叠加 chip group */
+.drillExtrasRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 4px 0 8px;
+}
+
+.drillExtrasLabel {
+  font-size: 12px;
+  color: rgba(245, 240, 223, 0.6);
+  margin-right: 4px;
+}
+
+.drillExtrasChip {
+  background: transparent;
+  border: 1px solid rgba(245, 240, 223, 0.22);
+  color: rgba(245, 240, 223, 0.7);
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background-color 0.14s, border-color 0.14s, color 0.14s;
+}
+
+.drillExtrasChip:hover {
+  border-color: rgba(245, 240, 223, 0.45);
+  color: #f5f0df;
+}
+
+.drillExtrasChip.active {
+  font-weight: 600;
+}
+
 /* P2.4 历史归档下载 */
 .historyMeta {
   display: flex;

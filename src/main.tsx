@@ -159,10 +159,18 @@ function DrillToolbar({
   );
 }
 
+type ExtraMetric = {
+  key: string;
+  label: string;
+  axis: "money" | "ratio";
+  color: string;
+};
+
 type DrillWindowSlice = {
   main: AnyRecord[];
   compare: AnyRecord[] | null;
-  windowSize: number;  // 实际使用的窗口长度
+  extras?: ExtraMetric[];
+  windowSize: number;
 };
 
 function sliceDrillWindow(rows: AnyRecord[], windowSize: number, compare: boolean): DrillWindowSlice {
@@ -207,17 +215,20 @@ function DrillChart({
   rows,
   buildOption,
   defaultWindow = 0,
-  compareEndpoint
+  compareEndpoint,
+  availableExtras
 }: {
   rows: AnyRecord[];
   buildOption: (slice: DrillWindowSlice) => unknown;
   defaultWindow?: number;
   compareEndpoint?: CompareEndpoint;
+  availableExtras?: ExtraMetric[];
 }) {
   const [windowSize, setWindowSize] = React.useState(defaultWindow);
   const [preset, setPreset] = React.useState<ComparePreset>("");
   const [remoteCompare, setRemoteCompare] = React.useState<AnyRecord[] | null>(null);
   const [remoteLoading, setRemoteLoading] = React.useState(false);
+  const [selectedExtras, setSelectedExtras] = React.useState<string[]>([]);
 
   const localSlice = sliceDrillWindow(rows, windowSize, preset === "prev");
   const mainStart = localSlice.main[0]?.date as string | undefined;
@@ -268,9 +279,11 @@ function DrillChart({
       ? remoteCompare
       : null;
 
+  const activeExtras = availableExtras?.filter((m) => selectedExtras.includes(m.key)) ?? [];
   const sliceForBuild: DrillWindowSlice = {
     main: localSlice.main,
     compare: finalCompare,
+    extras: activeExtras,
     windowSize: localSlice.windowSize
   };
   const option = buildOption(sliceForBuild);
@@ -291,6 +304,29 @@ function DrillChart({
         remoteLoading={remoteLoading}
         remoteEmpty={remoteEmpty}
       />
+      {availableExtras && availableExtras.length > 0 && (
+        <div className="drillExtrasRow">
+          <span className="drillExtrasLabel">叠加指标</span>
+          {availableExtras.map((metric) => {
+            const active = selectedExtras.includes(metric.key);
+            return (
+              <button
+                key={metric.key}
+                type="button"
+                className={`drillExtrasChip ${active ? "active" : ""}`}
+                style={active ? { borderColor: metric.color, color: metric.color, background: `${metric.color}1a` } : undefined}
+                onClick={() =>
+                  setSelectedExtras((prev) =>
+                    prev.includes(metric.key) ? prev.filter((k) => k !== metric.key) : [...prev, metric.key]
+                  )
+                }
+              >
+                {metric.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
       <EChart height={420} option={option} />
     </div>
   );
@@ -970,9 +1006,20 @@ function ProductView({ data }: { data: AnyRecord }) {
   const daily = (data.daily as AnyRecord[]) || [];
   const drillConfig =
     drilldown === "payDaily"
-      ? { title: "全店支付金额分日走势", build: (s: DrillWindowSlice) => dailyPayOption(s.main, s.compare), endpoint: { view: "product" as const, metric: "pay", metricKey: "pay" } }
+      ? { title: "全店支付金额分日走势", build: (s: DrillWindowSlice) => dailyPayOption(s.main, s.compare), endpoint: { view: "product" as const, metric: "pay", metricKey: "pay" }, extras: undefined as ExtraMetric[] | undefined }
       : drilldown === "netFeeDaily"
-        ? { title: "全店净费比分日走势", build: (s: DrillWindowSlice) => dailyNetFeeOption(s.main, s.compare), endpoint: { view: "product" as const, metric: "netFeeRatio", metricKey: "netFeeRatio" } }
+        ? {
+            title: "全店净费比分日走势",
+            build: (s: DrillWindowSlice) => dailyNetFeeOption(s.main, s.compare, s.extras),
+            endpoint: { view: "product" as const, metric: "netFeeRatio", metricKey: "netFeeRatio" },
+            extras: [
+              { key: "支付金额", label: "支付", axis: "money" as const, color: "#f5c877" },
+              { key: "成功退款金额", label: "退款", axis: "money" as const, color: "#e56e60" },
+              { key: "推广消耗", label: "推广花费", axis: "money" as const, color: "#60c7bc" },
+              { key: "refundRatio", label: "退款率", axis: "ratio" as const, color: "#c084fc" },
+              { key: "netRoi", label: "净 ROI", axis: "ratio" as const, color: "#d9ee62" }
+            ]
+          }
         : null;
   const columns: ColumnDef<AnyRecord>[] = [
     { key: "subjectCode", label: "主体编码", width: "300px" },
@@ -1021,7 +1068,7 @@ function ProductView({ data }: { data: AnyRecord }) {
               <span>关闭</span>
             </button>
           </div>
-          <DrillChart rows={daily} buildOption={drillConfig.build} compareEndpoint={drillConfig.endpoint} />
+          <DrillChart rows={daily} buildOption={drillConfig.build} compareEndpoint={drillConfig.endpoint} availableExtras={(drillConfig as { extras?: ExtraMetric[] }).extras} />
         </div>
       )}
       <div className="panel">
@@ -1126,7 +1173,7 @@ function AdProductsView({ data }: { data: AnyRecord }) {
               <span>关闭</span>
             </button>
           </div>
-          <DrillChart rows={daily} buildOption={drillConfig.build} compareEndpoint={drillConfig.endpoint} />
+          <DrillChart rows={daily} buildOption={drillConfig.build} compareEndpoint={drillConfig.endpoint} availableExtras={(drillConfig as { extras?: ExtraMetric[] }).extras} />
         </div>
       )}
       <div className="splitGrid">
@@ -1214,7 +1261,7 @@ function KeywordView({ data }: { data: AnyRecord }) {
               <span>关闭</span>
             </button>
           </div>
-          <DrillChart rows={daily} buildOption={drillConfig.build} compareEndpoint={drillConfig.endpoint} />
+          <DrillChart rows={daily} buildOption={drillConfig.build} compareEndpoint={drillConfig.endpoint} availableExtras={(drillConfig as { extras?: ExtraMetric[] }).extras} />
         </div>
       )}
       <div className="threeGrid">
@@ -1284,7 +1331,7 @@ function CrowdView({ data }: { data: AnyRecord }) {
               <span>关闭</span>
             </button>
           </div>
-          <DrillChart rows={daily} buildOption={drillConfig.build} compareEndpoint={drillConfig.endpoint} />
+          <DrillChart rows={daily} buildOption={drillConfig.build} compareEndpoint={drillConfig.endpoint} availableExtras={(drillConfig as { extras?: ExtraMetric[] }).extras} />
         </div>
       )}
       <div className="splitGrid">
@@ -1350,7 +1397,7 @@ function ContentView({ data }: { data: AnyRecord }) {
               <span>关闭</span>
             </button>
           </div>
-          <DrillChart rows={daily} buildOption={drillConfig.build} compareEndpoint={drillConfig.endpoint} />
+          <DrillChart rows={daily} buildOption={drillConfig.build} compareEndpoint={drillConfig.endpoint} availableExtras={(drillConfig as { extras?: ExtraMetric[] }).extras} />
         </div>
       )}
       <div className="panel">
@@ -1625,7 +1672,7 @@ function dailyNumberOption(rows: AnyRecord[] = [], valueKey: string, metricLabel
   };
 }
 
-function dailyNetFeeOption(rows: AnyRecord[] = [], compareRows: AnyRecord[] | null = null) {
+function dailyNetFeeOption(rows: AnyRecord[] = [], compareRows: AnyRecord[] | null = null, extras: ExtraMetric[] = []) {
   const dates = rows.map((row) => String(row.date || ""));
   const ratios = rows.map((row) => {
     const value = Number(row.netFeeRatio);
@@ -1651,14 +1698,17 @@ function dailyNetFeeOption(rows: AnyRecord[] = [], compareRows: AnyRecord[] | nu
           return `<div style="margin:2px 0">${p.marker} ${p.seriesName}: <strong>${fmtPercent(Number(v))}</strong></div>`;
         });
         let extra = "";
-        if (row.anomalous) {
-          const pay = Number(row["支付金额"]) || 0;
-          const refund = Number(row["成功退款金额"]) || 0;
-          extra = `
-            <div style="margin-top:8px; padding-top:6px; border-top:1px dashed rgba(245,200,119,0.3); color:#ff8a2a; font-size:12px; max-width:280px">
-              ⚠️ 单日异常：退款 ${fmtMoney(refund)} &gt; 支付 ${fmtMoney(pay)}
-              <div style="color:#d9d4c4; margin-top:4px">通常是退款滞后入账造成的口径错位，建议看 7 日均线</div>
-            </div>`;
+        const flags = Array.isArray(row.flags) ? (row.flags as AnyRecord[]) : [];
+        if (flags.length > 0) {
+          const flagLines = flags.map((flag) => {
+            const color = flag.severity === "warning" ? "#ff8a2a" : "#f5d27d";
+            return `
+              <div style="margin-top:6px; padding-top:5px; border-top:1px dashed rgba(245,200,119,0.2)">
+                <div style="color:${color}; font-size:12px; font-weight:600">⚠️ ${flag.label}</div>
+                <div style="color:#d9d4c4; margin-top:2px; font-size:11px; max-width:300px">${flag.hint}</div>
+              </div>`;
+          });
+          extra = flagLines.join("");
         }
         return `<div><strong>${first.axisValue}</strong>${lines.join("")}${extra}</div>`;
       }
@@ -1688,16 +1738,27 @@ function dailyNetFeeOption(rows: AnyRecord[] = [], compareRows: AnyRecord[] | nu
       axisLabel: { color: "#d9d4c4", rotate: 38 },
       axisLine: { lineStyle: { color: "rgba(245, 200, 119, 0.35)" } }
     },
-    yAxis: {
-      type: "value",
-      name: "净费比",
-      axisLabel: { color: "#d9d4c4", formatter: (value: number) => fmtPercent(value) },
-      splitLine: { lineStyle: { color: "rgba(255,255,255,.1)" } }
-    },
+    yAxis: [
+      {
+        type: "value",
+        name: "净费比",
+        axisLabel: { color: "#d9d4c4", formatter: (value: number) => fmtPercent(value) },
+        splitLine: { lineStyle: { color: "rgba(255,255,255,.1)" } }
+      },
+      {
+        type: "value",
+        name: "金额",
+        position: "right",
+        show: extras.some((m) => m.axis === "money"),
+        axisLabel: { color: "#d9d4c4", formatter: (value: number) => fmtMoney(value) },
+        splitLine: { show: false }
+      }
+    ],
     series: [
       {
         name: "净费比",
         type: "line",
+        yAxisIndex: 0,
         smooth: true,
         symbol: "circle",
         symbolSize: (_value: unknown, params: { dataIndex: number }) => (anomalies[params.dataIndex] ? 13 : 6),
@@ -1744,7 +1805,21 @@ function dailyNetFeeOption(rows: AnyRecord[] = [], compareRows: AnyRecord[] | nu
       ...buildCompareLineSeries("净费比", compareRows, dates.length, (r) => {
         const v = Number(r.netFeeRatio);
         return Number.isFinite(v) ? v : null;
-      })
+      }),
+      // P3.1 用户勾选叠加指标
+      ...extras.map((m) => ({
+        name: m.label,
+        type: "line",
+        yAxisIndex: m.axis === "money" ? 1 : 0,
+        smooth: true,
+        symbol: "none",
+        lineStyle: { color: m.color, width: 2, type: "dotted" },
+        itemStyle: { color: m.color },
+        data: rows.map((r) => {
+          const v = Number(r[m.key]);
+          return Number.isFinite(v) ? v : null;
+        })
+      }))
     ]
   };
 }
