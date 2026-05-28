@@ -469,7 +469,7 @@ export async function buildMeta() {
 
 export async function buildProductView(range = {}) {
   const { product, adItem, content } = await loadRaw();
-  const rows = filterRows(product, range, "统计日期", ["商品标题", "商品ID"]);
+  const rows = filterRows(product, range, "统计日期", ["商品名称", "商品标题", "商品ID"]);
 
   // 全店推广花费：从推广商品报表 + 推广内容报表的"花费"按日期聚合
   // （product 表的"推广消耗"字段在生参排行榜里普遍为空，不能作为全店口径）
@@ -490,18 +490,25 @@ export async function buildProductView(range = {}) {
   // 按商品ID 聚合 adItem 花费（只 adItem 表的"主体类型=商品"行能 join 到 product 表
   // content 表"主体类型=短视频"，主体ID 是内容ID，无法可靠分摊到单品）
   const adItemSpendByItemId = new Map();
+  // 同时收集主体名称用于补全 product 表里缺失的商品标题
+  const adItemNameById = new Map();
   const adItemRowsFiltered = filterRows(adItem, range, "日期", ["主体名称", "计划名字", "场景名字"]);
   for (const row of adItemRowsFiltered) {
     if (row["主体类型"] !== "商品" || !row["主体ID"]) continue;
     const id = String(row["主体ID"]);
     adItemSpendByItemId.set(id, (adItemSpendByItemId.get(id) || 0) + cleanNumber(row["花费"]));
+    if (!adItemNameById.has(id) && row["主体名称"]) {
+      adItemNameById.set(id, String(row["主体名称"]));
+    }
   }
 
   const groups = new Map();
 
   for (const row of rows) {
     const itemId = row["商品ID"] ? String(Math.trunc(cleanNumber(row["商品ID"]))) : "未识别";
-    const title = String(row["商品标题"] || "未识别商品");
+    // 生参导出在不同版本下字段名不一致：早期叫"商品标题"，新版叫"商品名称"
+    // 没拿到的情况下还能从 adItem 表的"主体名称"反查（join on 商品ID = 主体ID）
+    const title = String(row["商品名称"] || row["商品标题"] || adItemNameById.get(itemId) || "未识别商品");
     const key = `${itemId}${title}`;
     addToGroup(
       groups,
