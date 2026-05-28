@@ -515,6 +515,16 @@ function sourceModeLabel(value: unknown) {
   return "默认";
 }
 
+// 商品级"费比 / 链接净ROI"在 spend=0 或 pay=0 时数学上无定义，
+// 用业务语义字样区分，避免把 0% / "-" 误读为"推广高效"或"数据缺失"
+function formatPromoMetric(value: unknown, row: AnyRecord, formatter: (v: unknown) => string) {
+  const pay = Number(row.pay) || 0;
+  const spend = Number(row["推广消耗"]) || 0;
+  if (spend === 0) return "未推广";
+  if (pay === 0) return "无销售";
+  return formatter(value);
+}
+
 function ProductView({ data }: { data: AnyRecord }) {
   const [drilldown, setDrilldown] = React.useState<ProductDrilldown | null>(null);
   const summary = data.summary as AnyRecord;
@@ -535,13 +545,13 @@ function ProductView({ data }: { data: AnyRecord }) {
     { key: "customerPrice", label: "客单价", format: fmtNumber },
     { key: "annualPay", label: "年累计支付金额", format: fmtMoney },
     { key: "annualPayShare", label: "年累计支付金额占比", format: fmtPercent },
-    { key: "feeRatio", label: "费比", format: fmtPercent },
+    { key: "feeRatio", label: "费比", format: (value, row) => formatPromoMetric(value, row, fmtPercent) },
     { key: "refundRatio", label: "退款金额占比", format: fmtPercent },
     { key: "repeatRate", label: "复购率", format: fmtPercent },
     { key: "repeatPayRatio", label: "复购金额占比", format: fmtPercent },
     { key: "cartRate", label: "加购率", format: fmtPercent },
     { key: "pvPerVisitor", label: "人均浏览量", format: fmtNumber },
-    { key: "netRoi", label: "链接净ROI", format: fmtNumber }
+    { key: "netRoi", label: "链接净ROI", format: (value, row) => formatPromoMetric(value, row, fmtNumber) }
   ];
 
   return (

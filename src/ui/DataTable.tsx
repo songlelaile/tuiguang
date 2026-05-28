@@ -4,7 +4,7 @@ export type ColumnDef<T extends Record<string, unknown>> = {
   key: string;
   label: string;
   width?: string;
-  format?: (value: unknown) => string;
+  format?: (value: unknown, row: T) => string;
 };
 
 type DataTableProps<T extends Record<string, unknown>> = {
@@ -40,7 +40,7 @@ export function DataTable<T extends Record<string, unknown>>({ rows, columns, pa
             <tr key={`${start + index}-${String(row[columns[0]?.key] || "")}`}>
               {columns.map((column) => {
                 const raw = row[column.key];
-                return <td key={column.key}>{column.format ? column.format(raw) : String(raw ?? "-")}</td>;
+                return <td key={column.key}>{column.format ? column.format(raw, row) : String(raw ?? "-")}</td>;
               })}
             </tr>
           ))}
