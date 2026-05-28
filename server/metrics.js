@@ -468,8 +468,25 @@ export async function buildMeta() {
 }
 
 export async function buildProductView(range = {}) {
-  const { product } = await loadRaw();
+  const { product, adItem, content } = await loadRaw();
   const rows = filterRows(product, range, "统计日期", ["商品标题", "商品ID"]);
+
+  // 全店推广花费：从推广商品报表 + 推广内容报表的"花费"按日期聚合
+  // （product 表的"推广消耗"字段在生参排行榜里普遍为空，不能作为全店口径）
+  const adRows = filterRows([...adItem, ...content], range, "日期", ["主体名称", "计划名字", "场景名字"]);
+  const adSpendByDate = new Map();
+  for (const row of adRows) {
+    const date = parseDateText(row["日期"]);
+    if (!date) continue;
+    adSpendByDate.set(date, (adSpendByDate.get(date) || 0) + cleanNumber(row["花费"]));
+  }
+  const adSpendByWeek = new Map();
+  for (const [date, spend] of adSpendByDate) {
+    const key = getIsoWeek(date).sortKey;
+    adSpendByWeek.set(key, (adSpendByWeek.get(key) || 0) + spend);
+  }
+  const totalAdSpend = [...adSpendByDate.values()].reduce((sum, v) => sum + v, 0);
+
   const groups = new Map();
 
   for (const row of rows) {
@@ -537,6 +554,10 @@ export async function buildProductView(range = {}) {
     const week = getIsoWeek(parseDateText(row["统计日期"]));
     addToGroup(weekGroups, week.sortKey, () => ({ week: week.label, sortKey: week.sortKey }), (target) => sumFields(target, row, productFields));
   }
+  // 用 adItem+content 的周花费覆盖 product 表自带的"推广消耗"
+  for (const target of weekGroups.values()) {
+    target["推广消耗"] = round(adSpendByWeek.get(target.sortKey) || 0, 2) || 0;
+  }
   const weekly = [...weekGroups.values()].map(enrichProductMetrics).sort((a, b) => String(b.sortKey).localeCompare(String(a.sortKey)));
 
   const dayGroups = new Map();
@@ -545,6 +566,10 @@ export async function buildProductView(range = {}) {
     if (!date) continue;
     addToGroup(dayGroups, date, () => ({ date, sortKey: date }), (target) => sumFields(target, row, productFields));
   }
+  // 用 adItem+content 的日花费覆盖 product 表自带的"推广消耗"
+  for (const target of dayGroups.values()) {
+    target["推广消耗"] = round(adSpendByDate.get(target.date) || 0, 2) || 0;
+  }
   const daily = [...dayGroups.values()].map(enrichProductMetrics).sort((a, b) => String(a.sortKey).localeCompare(String(b.sortKey)));
 
   return {
@@ -552,8 +577,11 @@ export async function buildProductView(range = {}) {
       rows: rows.length,
       groups: table.length,
       totalPay: round(totalPay, 2),
+      totalSpend: round(totalAdSpend, 2),
+      productTableSpend: round(totalSpend, 2),
       topShare: table[0] ? round(div(table[0].pay, totalPay), 4) : null,
-      netFeeRatio: round(div(totalSpend, totalPay - totalRefund), 4)
+      netFeeRatio: round(div(totalAdSpend, totalPay - totalRefund), 4),
+      spendSource: "adUnion"
     },
     treemap,
     weekly,
