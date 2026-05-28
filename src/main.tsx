@@ -1149,12 +1149,37 @@ function dailyNetFeeOption(rows: AnyRecord[] = []) {
     const value = Number(row.netFeeRatio);
     return Number.isFinite(value) ? value : null;
   });
+  const anomalies = rows.map((row) => Boolean(row.anomalous));
   const startValue = Math.max(0, dates.length - 45);
 
   return {
     tooltip: {
       trigger: "axis",
-      valueFormatter: (value: unknown) => fmtPercent(typeof value === "number" ? value : Number(value))
+      backgroundColor: "rgba(20, 24, 16, 0.95)",
+      borderColor: "rgba(245, 200, 119, 0.4)",
+      textStyle: { color: "#f5f0df" },
+      formatter: (params: unknown) => {
+        const arr = Array.isArray(params) ? params : [params];
+        const first = arr[0] as { dataIndex: number; axisValue: string } | undefined;
+        if (!first) return "";
+        const i = first.dataIndex;
+        const row = rows[i] || {};
+        const lines = arr.map((p: any) => {
+          const v = typeof p.value === "object" && p.value !== null ? p.value.value : p.value;
+          return `<div style="margin:2px 0">${p.marker} ${p.seriesName}: <strong>${fmtPercent(Number(v))}</strong></div>`;
+        });
+        let extra = "";
+        if (row.anomalous) {
+          const pay = Number(row["支付金额"]) || 0;
+          const refund = Number(row["成功退款金额"]) || 0;
+          extra = `
+            <div style="margin-top:8px; padding-top:6px; border-top:1px dashed rgba(245,200,119,0.3); color:#ff8a2a; font-size:12px; max-width:280px">
+              ⚠️ 单日异常：退款 ${fmtMoney(refund)} &gt; 支付 ${fmtMoney(pay)}
+              <div style="color:#d9d4c4; margin-top:4px">通常是退款滞后入账造成的口径错位，建议看 7 日均线</div>
+            </div>`;
+        }
+        return `<div><strong>${first.axisValue}</strong>${lines.join("")}${extra}</div>`;
+      }
     },
     legend: { top: 0, textStyle: { color: "#d9d4c4" } },
     grid: { left: 64, right: 24, top: 46, bottom: dates.length > 45 ? 78 : 56 },
@@ -1193,11 +1218,37 @@ function dailyNetFeeOption(rows: AnyRecord[] = []) {
         type: "line",
         smooth: true,
         symbol: "circle",
-        symbolSize: 6,
-        itemStyle: { color: "#f5c877" },
+        symbolSize: (_value: unknown, params: { dataIndex: number }) => (anomalies[params.dataIndex] ? 13 : 6),
+        itemStyle: {
+          color: (params: { dataIndex: number }) => (anomalies[params.dataIndex] ? "#ff5b4d" : "#f5c877")
+        },
         lineStyle: { color: "#f5c877", width: 3 },
         areaStyle: { color: "rgba(245, 200, 119, 0.16)" },
-        data: ratios
+        data: ratios.map((value, index) =>
+          anomalies[index]
+            ? {
+                value,
+                itemStyle: {
+                  color: "#ff5b4d",
+                  borderColor: "#fff5e6",
+                  borderWidth: 2,
+                  shadowColor: "rgba(255, 91, 77, 0.65)",
+                  shadowBlur: 10
+                }
+              }
+            : value
+        ),
+        markPoint: anomalies.some(Boolean)
+          ? {
+              symbol: "pin",
+              symbolSize: 32,
+              itemStyle: { color: "#ff5b4d" },
+              label: { color: "#fff5e6", fontSize: 11, formatter: "异常" },
+              data: anomalies
+                .map((flag, index) => (flag ? { coord: [dates[index], ratios[index]] } : null))
+                .filter(Boolean) as Array<{ coord: [string, number | null] }>
+            }
+          : undefined
       },
       {
         name: "7日均线",

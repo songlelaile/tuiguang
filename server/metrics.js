@@ -570,7 +570,23 @@ export async function buildProductView(range = {}) {
   for (const target of dayGroups.values()) {
     target["推广消耗"] = round(adSpendByDate.get(target.date) || 0, 2) || 0;
   }
-  const daily = [...dayGroups.values()].map(enrichProductMetrics).sort((a, b) => String(a.sortKey).localeCompare(String(b.sortKey)));
+  const daily = [...dayGroups.values()]
+    .map(enrichProductMetrics)
+    .map((row) => {
+      // 标记单日异常：退款金额 > 支付金额（净支付为负，net 费比因此变成大负数）
+      // 通常是退款滞后入账造成的口径错位，非真实业务恶化
+      const pay = cleanNumber(row["支付金额"]);
+      const refund = cleanNumber(row["成功退款金额"]);
+      if (pay > 0 && refund > pay) {
+        row.anomalous = true;
+        row.anomalyKind = "refund_exceeds_pay";
+        row.anomalyHint = "退款金额 > 支付金额，单日净费比受滞后退款冲账影响，建议结合 7 日均线观察";
+      } else {
+        row.anomalous = false;
+      }
+      return row;
+    })
+    .sort((a, b) => String(a.sortKey).localeCompare(String(b.sortKey)));
 
   return {
     summary: {
