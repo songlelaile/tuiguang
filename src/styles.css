@@ -962,6 +962,63 @@ tbody tr:hover td {
   cursor: not-allowed;
 }
 
+/* P2.4 历史归档下载 */
+.historyMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  background: rgba(245, 200, 119, 0.05);
+  border: 1px solid rgba(245, 200, 119, 0.18);
+  border-radius: 8px;
+  font-size: 12px;
+  color: rgba(245, 240, 223, 0.78);
+  font-variant-numeric: tabular-nums;
+}
+
+.historyMeta strong {
+  color: #f5c877;
+  margin-left: 4px;
+}
+
+.historyExportRow {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 6px 0 12px;
+}
+
+.historyExportRow label {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: rgba(245, 240, 223, 0.7);
+}
+
+.historyExportRow input[type="date"] {
+  background: rgba(245, 240, 223, 0.05);
+  border: 1px solid rgba(245, 200, 119, 0.25);
+  color: #f5f0df;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  color-scheme: dark;
+}
+
+.historyExportRow input[type="date"]:hover {
+  border-color: rgba(245, 200, 119, 0.5);
+}
+
+.historyHint {
+  font-size: 11px;
+  color: rgba(245, 240, 223, 0.5);
+  font-style: italic;
+}
+
 @media (max-width: 960px) {
   .timelineRow {
     grid-template-columns: 80px 1fr;

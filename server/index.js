@@ -20,7 +20,17 @@ import {
   resetRawCache,
   sourceUploadSlots
 } from "./metrics.js";
-import { getCoverage, ingestUpload, listUploads, queryAdSummary, queryProductHistory } from "./history.js";
+import {
+  getCoverage,
+  ingestUpload,
+  iterateTableRaw,
+  listUploads,
+  queryAdSummary,
+  queryProductHistory,
+  tableExportName
+} from "./history.js";
+import { ZipArchive } from "archiver";
+import { stringify as csvStringify } from "csv-stringify/sync";
 
 const app = express();
 const port = Number(process.env.PORT || 5174);
@@ -364,6 +374,45 @@ app.get("/api/history/ad-summary", (req, res, next) => {
     const end = typeof req.query.end === "string" ? req.query.end : "";
     res.json(queryAdSummary({ start, end }));
   } catch (e) { next(e); }
+});
+
+// P2.3 跨周期 zip 下载：把指定时间范围内 5 张表 raw_json 还原成生参原始格式的 csv，打包
+app.get("/api/history/export", (req, res, next) => {
+  try {
+    const start = typeof req.query.start === "string" ? req.query.start : "";
+    const end = typeof req.query.end === "string" ? req.query.end : "";
+    const tag = start || end ? `${start || "起点"}_${end || "至今"}` : "全周期";
+    const filename = `tuiguang-历史归档_${tag}.zip`;
+
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+
+    const archive = new ZipArchive({ zlib: { level: 6 } });
+    archive.on("warning", (err) => { if (err.code !== "ENOENT") next(err); });
+    archive.on("error", (err) => next(err));
+    archive.pipe(res);
+
+    // 5 张表
+    const tables = ["product_daily", "ad_item", "content", "keyword", "crowd"];
+    for (const table of tables) {
+      const rows = [];
+      let header = null;
+      for (const raw of iterateTableRaw(table, { start, end })) {
+        if (!header) header = Object.keys(raw);
+        rows.push(raw);
+      }
+      if (!rows.length) continue;
+      // csv-stringify 用第一行的字段顺序作为列；同时编 GB18030 兼容 Excel 中文
+      const csvText = csvStringify(rows, { header: true, columns: header });
+      // 转 GB18030：Node 自带 TextEncoder 不支持，archiver 直接写 utf-8（前面加 BOM 让 Excel 识别）
+      // 实际生参原文件就是 GB18030，但用户拿去 Excel 打开 utf-8 带 BOM 也能正确显示中文
+      archive.append("﻿" + csvText, { name: tableExportName[table] });
+    }
+
+    archive.finalize();
+  } catch (e) {
+    next(e);
+  }
 });
 
 app.get("/api/contents/export", async (req, res, next) => {

@@ -627,7 +627,102 @@ function SourcesView({ meta, onMetaChange }: { meta: Meta | null; onMetaChange: 
         <AlignmentTimeline alignment={meta?.alignment} />
         <DataTable rows={meta?.sources || []} columns={columns} pageSize={20} />
       </div>
+      <HistoryArchivePanel />
     </section>
+  );
+}
+
+type CoverageInfo = {
+  uploads: number;
+  product_rows: number; ad_item_rows: number; content_rows: number;
+  keyword_rows: number; crowd_rows: number;
+  product_date_min: string | null; product_date_max: string | null;
+  ad_item_date_min: string | null; ad_item_date_max: string | null;
+  content_date_min: string | null; content_date_max: string | null;
+  keyword_date_min: string | null; keyword_date_max: string | null;
+  crowd_date_min: string | null; crowd_date_max: string | null;
+};
+
+function HistoryArchivePanel() {
+  const [coverage, setCoverage] = React.useState<CoverageInfo | null>(null);
+  const [error, setError] = React.useState("");
+  const [exportStart, setExportStart] = React.useState("");
+  const [exportEnd, setExportEnd] = React.useState("");
+
+  React.useEffect(() => {
+    fetch("/api/history/coverage")
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((data) => {
+        setCoverage(data);
+        // 默认填入库覆盖范围
+        const start = data.product_date_min || data.ad_item_date_min || "";
+        const end = data.product_date_max || data.ad_item_date_max || "";
+        setExportStart(start || "");
+        setExportEnd(end || "");
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : "加载失败"));
+  }, []);
+
+  const coverageStart = coverage
+    ? [coverage.product_date_min, coverage.ad_item_date_min, coverage.content_date_min, coverage.keyword_date_min, coverage.crowd_date_min].filter(Boolean).sort()[0] || ""
+    : "";
+  const coverageEnd = coverage
+    ? [coverage.product_date_max, coverage.ad_item_date_max, coverage.content_date_max, coverage.keyword_date_max, coverage.crowd_date_max].filter(Boolean).sort().reverse()[0] || ""
+    : "";
+
+  const totalRows = coverage
+    ? coverage.product_rows + coverage.ad_item_rows + coverage.content_rows + coverage.keyword_rows + coverage.crowd_rows
+    : 0;
+
+  const exportUrl = (() => {
+    const params = new URLSearchParams();
+    if (exportStart) params.set("start", exportStart);
+    if (exportEnd) params.set("end", exportEnd);
+    const qs = params.toString();
+    return `/api/history/export${qs ? `?${qs}` : ""}`;
+  })();
+
+  return (
+    <div className="panel">
+      <div className="panelHeader">
+        <div>
+          <p className="eyebrow">长期存储 · 历史归档</p>
+          <h2>跨周期下载</h2>
+        </div>
+        <span className="pill">
+          {coverage ? `${coverage.uploads} 次上传 · ${fmtInt(totalRows)} 行` : "加载中..."}
+        </span>
+      </div>
+      {error && <div className="uploadNotice">{error}</div>}
+      {coverage && (
+        <>
+          <div className="historyMeta">
+            <span>库覆盖范围 <strong>{coverageStart || "—"}</strong> ~ <strong>{coverageEnd || "—"}</strong></span>
+            <span>商品维度 <strong>{fmtInt(coverage.product_rows)}</strong> 行</span>
+            <span>推广商品 <strong>{fmtInt(coverage.ad_item_rows)}</strong> 行</span>
+            <span>推广内容 <strong>{fmtInt(coverage.content_rows)}</strong> 行</span>
+            <span>关键词 <strong>{fmtInt(coverage.keyword_rows)}</strong> 行</span>
+            <span>人群 <strong>{fmtInt(coverage.crowd_rows)}</strong> 行</span>
+          </div>
+          <div className="historyExportRow">
+            <label>
+              <span>开始日期</span>
+              <input type="date" value={exportStart} onChange={(e) => setExportStart(e.target.value)} min={coverageStart} max={coverageEnd} />
+            </label>
+            <label>
+              <span>结束日期</span>
+              <input type="date" value={exportEnd} onChange={(e) => setExportEnd(e.target.value)} min={coverageStart} max={coverageEnd} />
+            </label>
+            <a className="exportButton" href={exportUrl} download title="下载该时段对齐的 5 张表 zip（生参原始 csv 格式）">
+              下载 ZIP（5 张对齐 csv）
+            </a>
+          </div>
+          <div className="historyHint">
+            导出的 zip 包含 5 个 csv（utf-8 + BOM，Excel 可直接打开），字段顺序跟生参原始导出完全一致，可重新上传或直接用 Excel 分析。
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 

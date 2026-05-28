@@ -431,6 +431,53 @@ export function queryAdSummary({ start, end }) {
     .all(params);
 }
 
+// ---- P2.3 跨周期导出：把库里某段时间的 raw_json 直接 yield 出来 ----
+// 还原成生参原始 csv 列（字段名 + 顺序由第一行决定）
+
+const tableOrderBy = {
+  product_daily: "date ASC, item_id ASC",
+  ad_item: "date ASC, subject_id ASC, plan_id ASC",
+  content: "date ASC, subject_id ASC, plan_id ASC",
+  keyword: "date ASC, word_key ASC, plan_id ASC",
+  crowd: "date ASC, crowd_key ASC, plan_id ASC"
+};
+
+export function* iterateTableRaw(table, { start, end }) {
+  const conn = ensureDb();
+  const where = ["raw_json IS NOT NULL"];
+  const params = {};
+  if (start) { where.push("date >= @start"); params.start = start; }
+  if (end) { where.push("date <= @end"); params.end = end; }
+  const orderBy = tableOrderBy[table] || "date ASC";
+  const stmt = conn.prepare(`SELECT raw_json FROM ${table} WHERE ${where.join(" AND ")} ORDER BY ${orderBy}`);
+  for (const row of stmt.iterate(params)) {
+    if (!row.raw_json) continue;
+    try {
+      yield JSON.parse(row.raw_json);
+    } catch {
+      // 损坏行跳过
+    }
+  }
+}
+
+// 不同表用的"日期"字段名不同，导出还原时需要
+export const tableDateField = {
+  product_daily: "统计日期",
+  ad_item: "日期",
+  content: "日期",
+  keyword: "日期",
+  crowd: "日期"
+};
+
+// 各表导出文件名（中文，跟生参导出习惯一致）
+export const tableExportName = {
+  product_daily: "店铺数据_商品维度.csv",
+  ad_item: "店铺数据_推广商品报表.csv",
+  content: "店铺数据_推广内容报表.csv",
+  keyword: "店铺数据_推广关键词报表.csv",
+  crowd: "店铺数据_推广人群报表.csv"
+};
+
 export function closeDb() {
   if (db) { db.close(); db = null; }
 }
