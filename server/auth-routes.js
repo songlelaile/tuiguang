@@ -25,11 +25,33 @@ import {
 import { issueCaptcha, verifyCaptcha } from "./captcha.js";
 import { activeProvider, sendSms } from "./sms.js";
 
+// 功能开关:env "false" 关闭,缺省/其它值为开
+// AUTH_OPEN_REGISTRATION=false → 必须邀请码才能注册
+// AUTH_SMS_LOGIN=false         → 隐藏手机短信入口,/api/auth/sms/* 返回 404
+function isOpenRegistrationEnabled() {
+  return process.env.AUTH_OPEN_REGISTRATION !== "false";
+}
+function isSmsLoginEnabled() {
+  return process.env.AUTH_SMS_LOGIN !== "false";
+}
+
 export function createAuthRouter(getDb) {
   const router = express.Router();
 
+  // GET /api/auth/features — 前端用此决定哪些 UI 显示;无需登录
+  router.get("/features", (_req, res) => {
+    res.json({
+      open_registration: isOpenRegistrationEnabled(),
+      sms_login: isSmsLoginEnabled(),
+      sms_provider: activeProvider()
+    });
+  });
+
   // GET /api/auth/captcha — 取一道算术题,前端把答案 + id 回带
   router.get("/captcha", (_req, res) => {
+    if (!isOpenRegistrationEnabled()) {
+      return res.status(403).json({ error: "开放注册当前未启用" });
+    }
     res.json(issueCaptcha());
   });
 
@@ -44,11 +66,12 @@ export function createAuthRouter(getDb) {
     const emailErr = validateEmail(email);
     if (emailErr) return res.status(400).json({ error: emailErr });
 
-    // 开放注册:不再强制 invite_code;但如果给了就走核销逻辑(便于内部追踪/受控分发)
     const usingInvite = typeof invite_code === "string" && invite_code.trim().length > 0;
 
-    // 没用邀请码时,必须过验证码
     if (!usingInvite) {
+      if (!isOpenRegistrationEnabled()) {
+        return res.status(403).json({ error: "当前为邀请注册模式,请填写邀请码" });
+      }
       if (!verifyCaptcha(captcha_id, captcha_answer)) {
         return res.status(400).json({ error: "验证码不正确或已过期,请刷新重试" });
       }
@@ -116,6 +139,7 @@ export function createAuthRouter(getDb) {
   // ---- P4.1 手机号 + SMS 登录 ----
 
   router.post("/sms/send", async (req, res, next) => {
+    if (!isSmsLoginEnabled()) return res.status(404).json({ error: "短信登录暂未启用" });
     const db = getDb();
     const { phone } = req.body || {};
     const phoneErr = validatePhone(phone);
@@ -139,6 +163,7 @@ export function createAuthRouter(getDb) {
   });
 
   router.post("/sms/login", (req, res) => {
+    if (!isSmsLoginEnabled()) return res.status(404).json({ error: "短信登录暂未启用" });
     const db = getDb();
     const { phone, code } = req.body || {};
     const phoneErr = validatePhone(phone);

@@ -414,15 +414,25 @@ type User = {
   status: "active" | "disabled";
 };
 
+type AuthFeatures = {
+  open_registration: boolean;
+  sms_login: boolean;
+  sms_provider: string;
+};
+
+const DEFAULT_FEATURES: AuthFeatures = { open_registration: true, sms_login: true, sms_provider: "dev" };
+
 type AuthState = {
   user: User | null;
   loading: boolean;
+  features: AuthFeatures;
   refresh: () => Promise<void>;
 };
 
 function useAuth(): AuthState {
   const [user, setUser] = React.useState<User | null>(null);
   const [loading, setLoading] = React.useState(true);
+  const [features, setFeatures] = React.useState<AuthFeatures>(DEFAULT_FEATURES);
   const refresh = React.useCallback(async () => {
     try {
       const res = await fetch("/api/auth/me", { credentials: "include" });
@@ -440,8 +450,12 @@ function useAuth(): AuthState {
   }, []);
   React.useEffect(() => {
     refresh();
+    fetch("/api/auth/features", { credentials: "include" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((json) => { if (json) setFeatures({ ...DEFAULT_FEATURES, ...json }); })
+      .catch(() => { /* 失败时维持默认全开,体验最差不过是个按钮无效 */ });
   }, [refresh]);
-  return { user, loading, refresh };
+  return { user, loading, features, refresh };
 }
 
 const authShell: React.CSSProperties = {
@@ -479,7 +493,7 @@ const authError: React.CSSProperties = {
   background: "rgba(229, 80, 80, 0.12)", border: "1px solid rgba(229, 80, 80, 0.4)", color: "#ffb3b3", fontSize: 13
 };
 
-function LoginView({ onAuthChange }: { onAuthChange: () => Promise<void> }) {
+function LoginView({ onAuthChange, features }: { onAuthChange: () => Promise<void>; features: AuthFeatures }) {
   const [tab, setTab] = React.useState<"password" | "sms">("password");
   const tabStyle = (active: boolean): React.CSSProperties => ({
     flex: 1, padding: "10px 0", textAlign: "center", cursor: "pointer",
@@ -492,12 +506,14 @@ function LoginView({ onAuthChange }: { onAuthChange: () => Promise<void> }) {
       <div style={authCard}>
         <h1 style={authTitle}>货盘分析 BI</h1>
         <p style={authSub}>商品经营 / 推广投放 — 请登录</p>
-        <div style={{ display: "flex", marginBottom: 18, borderBottom: "1px solid rgba(245, 200, 119, 0.15)" }}>
-          <div style={tabStyle(tab === "password")} onClick={() => setTab("password")}>账号密码</div>
-          <div style={tabStyle(tab === "sms")} onClick={() => setTab("sms")}>手机短信</div>
-        </div>
-        {tab === "password" ? <PasswordLoginForm onAuthChange={onAuthChange} /> : <SmsLoginForm onAuthChange={onAuthChange} />}
-        <a href="#/register" style={authLink}>没有账号? 立即注册 →</a>
+        {features.sms_login && (
+          <div style={{ display: "flex", marginBottom: 18, borderBottom: "1px solid rgba(245, 200, 119, 0.15)" }}>
+            <div style={tabStyle(tab === "password")} onClick={() => setTab("password")}>账号密码</div>
+            <div style={tabStyle(tab === "sms")} onClick={() => setTab("sms")}>手机短信</div>
+          </div>
+        )}
+        {features.sms_login && tab === "sms" ? <SmsLoginForm onAuthChange={onAuthChange} /> : <PasswordLoginForm onAuthChange={onAuthChange} />}
+        {features.open_registration && <a href="#/register" style={authLink}>没有账号? 立即注册 →</a>}
       </div>
     </div>
   );
@@ -626,23 +642,25 @@ function SmsLoginForm({ onAuthChange }: { onAuthChange: () => Promise<void> }) {
   );
 }
 
-function RegisterView({ onAuthChange }: { onAuthChange: () => Promise<void> }) {
+function RegisterView({ onAuthChange, features }: { onAuthChange: () => Promise<void>; features: AuthFeatures }) {
   const initialInvite = React.useMemo(() => {
     const m = window.location.hash.match(/[?&]invite=([^&]+)/);
     return m ? decodeURIComponent(m[1]) : "";
   }, []);
+  const inviteOnlyMode = !features.open_registration;
   const [username, setUsername] = React.useState("");
   const [password, setPassword] = React.useState("");
   const [confirm, setConfirm] = React.useState("");
   const [email, setEmail] = React.useState("");
   const [invite, setInvite] = React.useState(initialInvite);
-  const [showInvite, setShowInvite] = React.useState(Boolean(initialInvite));
+  const [showInvite, setShowInvite] = React.useState(inviteOnlyMode || Boolean(initialInvite));
   const [captcha, setCaptcha] = React.useState<{ id: string; question: string } | null>(null);
   const [captchaAnswer, setCaptchaAnswer] = React.useState("");
   const [err, setErr] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
 
   const refreshCaptcha = React.useCallback(async () => {
+    if (inviteOnlyMode) return;
     try {
       const res = await fetch("/api/auth/captcha", { credentials: "include" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -652,13 +670,14 @@ function RegisterView({ onAuthChange }: { onAuthChange: () => Promise<void> }) {
     } catch (e) {
       setCaptcha(null);
     }
-  }, []);
+  }, [inviteOnlyMode]);
 
   React.useEffect(() => { refreshCaptcha(); }, [refreshCaptcha]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (password !== confirm) { setErr("两次输入的密码不一致"); return; }
+    if (inviteOnlyMode && !invite.trim()) { setErr("当前为邀请注册模式,请输入邀请码"); return; }
     setSubmitting(true);
     setErr("");
     try {
@@ -679,7 +698,7 @@ function RegisterView({ onAuthChange }: { onAuthChange: () => Promise<void> }) {
       const json = await res.json().catch(() => ({}));
       if (!res.ok) {
         setErr(json.error || `注册失败 (HTTP ${res.status})`);
-        if (!invite.trim()) refreshCaptcha();
+        if (!invite.trim() && !inviteOnlyMode) refreshCaptcha();
         return;
       }
       await onAuthChange();
@@ -690,10 +709,7 @@ function RegisterView({ onAuthChange }: { onAuthChange: () => Promise<void> }) {
   return (
     <div style={authShell}>
       <form onSubmit={submit} style={authCard}>
-        <h1 style={authTitle}>注册新账号</h1>
-        <p style={authSub}>
-          {invite.trim() ? "通过邀请码开通" : "开放注册,任何人都可以加入"}
-        </p>
+        <h1 style={{ ...authTitle, marginBottom: 24 }}>注册新账号</h1>
         <label style={authField}>
           <span style={authLabel}>用户名</span>
           <input style={authInput} autoFocus value={username} onChange={(e) => setUsername(e.target.value)} />
@@ -711,7 +727,7 @@ function RegisterView({ onAuthChange }: { onAuthChange: () => Promise<void> }) {
           <input style={authInput} type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
         </label>
 
-        {!invite.trim() && (
+        {!inviteOnlyMode && !invite.trim() && (
           <label style={authField}>
             <span style={authLabel}>验证码 (回答下面的算术题)</span>
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -734,7 +750,7 @@ function RegisterView({ onAuthChange }: { onAuthChange: () => Promise<void> }) {
 
         {showInvite ? (
           <label style={authField}>
-            <span style={authLabel}>邀请码 (选填,有邀请码时优先用此通道)</span>
+            <span style={authLabel}>{inviteOnlyMode ? "邀请码 (必填)" : "邀请码 (选填,有邀请码时优先用此通道)"}</span>
             <input style={authInput} value={invite} onChange={(e) => setInvite(e.target.value)} />
           </label>
         ) : (
@@ -972,8 +988,8 @@ function RootApp() {
   }
   if (!auth.user) {
     const route = hash.replace(/^#\/?/, "").split("?")[0];
-    if (route === "register") return <RegisterView onAuthChange={auth.refresh} />;
-    return <LoginView onAuthChange={auth.refresh} />;
+    if (route === "register") return <RegisterView onAuthChange={auth.refresh} features={auth.features} />;
+    return <LoginView onAuthChange={auth.refresh} features={auth.features} />;
   }
   return <App auth={auth} />;
 }

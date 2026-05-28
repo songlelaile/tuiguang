@@ -89,8 +89,12 @@ TZ=Asia/Shanghai
 # 首次部署:引导首个管理员账号(只在 users 表为空时生效;创建完后建议清掉密码)
 ADMIN_BOOTSTRAP_USERNAME=admin
 ADMIN_BOOTSTRAP_PASSWORD=<改成 12 位以上强密码>
-# session 有效期(可选,默认 14 天)
 SESSION_TTL_DAYS=14
+
+# 部署初期推荐"邀请码 only"模式:SMS 没接好之前避免用户进 SMS 入口看到错误
+# 阿里云签名审核通过后,这两个可以改回 true,并补 SMS_PROVIDER=aliyun + 4 个凭据
+AUTH_OPEN_REGISTRATION=false   # 关闭开放注册;只能用邀请码注册
+AUTH_SMS_LOGIN=false           # 隐藏"手机短信"登录入口
 ```
 
 准备 uploads + 历史库目录：
