@@ -89,26 +89,42 @@ function viewFromHash(): ViewKey {
   return navItems.some((item) => item.key === key) ? (key as ViewKey) : "product";
 }
 
-// ---- P0.2 时间窗口 + 上一周期对比 -----------------------------------------
+// ---- P0.2 + P2.2 时间窗口 + 多种对比方式 -----------------------------------
+
+type ComparePreset = "" | "prev" | "WoW" | "MoM" | "YoY";
+
+const comparePresetLabels: Record<ComparePreset, string> = {
+  "": "关闭对比",
+  prev: "前一周期",
+  WoW: "上周同期 (WoW)",
+  MoM: "上月同期 (MoM)",
+  YoY: "去年同期 (YoY)"
+};
 
 function DrillToolbar({
   total,
   windowSize,
   setWindowSize,
-  compare,
-  setCompare,
+  preset,
+  setPreset,
+  canPrev,
+  remoteAvailable,
+  remoteLoading,
+  remoteEmpty,
   presets = [7, 14, 30]
 }: {
   total: number;
   windowSize: number;
   setWindowSize: (n: number) => void;
-  compare: boolean;
-  setCompare: (b: boolean) => void;
+  preset: ComparePreset;
+  setPreset: (p: ComparePreset) => void;
+  canPrev: boolean;
+  remoteAvailable: boolean;
+  remoteLoading?: boolean;
+  remoteEmpty?: boolean;
   presets?: number[];
 }) {
-  // 自动算可用 preset：去重 + 不超过 total
   const options = Array.from(new Set([...presets.filter((p) => p < total), total])).sort((a, b) => a - b);
-  const canCompare = windowSize > 0 && windowSize * 2 <= total;
   return (
     <div className="drillToolbar">
       <div className="drillWindowGroup">
@@ -123,15 +139,22 @@ function DrillToolbar({
           </button>
         ))}
       </div>
-      <label className={`drillCompareToggle ${canCompare ? "" : "disabled"}`} title={canCompare ? "" : "前段数据不足，无法对比"}>
-        <input
-          type="checkbox"
-          checked={compare && canCompare}
-          disabled={!canCompare}
-          onChange={(e) => setCompare(e.target.checked)}
-        />
-        <span>对比前一周期</span>
-      </label>
+      <div className="drillCompareSelector">
+        <span className="drillCompareLabel">对比</span>
+        <select
+          value={preset}
+          onChange={(e) => setPreset(e.target.value as ComparePreset)}
+          className="drillCompareSelect"
+        >
+          <option value="">{comparePresetLabels[""]}</option>
+          <option value="prev" disabled={!canPrev}>{comparePresetLabels.prev}{canPrev ? "" : "（前段不足）"}</option>
+          <option value="WoW" disabled={!remoteAvailable}>{comparePresetLabels.WoW}{remoteAvailable ? "" : "（需历史库）"}</option>
+          <option value="MoM" disabled={!remoteAvailable}>{comparePresetLabels.MoM}{remoteAvailable ? "" : "（需历史库）"}</option>
+          <option value="YoY" disabled={!remoteAvailable}>{comparePresetLabels.YoY}{remoteAvailable ? "" : "（需历史库）"}</option>
+        </select>
+        {remoteLoading && <span className="drillCompareHint">加载中…</span>}
+        {remoteEmpty && !remoteLoading && <span className="drillCompareHint warn">该时段历史库无数据</span>}
+      </div>
     </div>
   );
 }
@@ -174,27 +197,99 @@ function buildCompareLineSeries(
   ];
 }
 
+type CompareEndpoint = {
+  view: "ad" | "product";
+  metric: string;
+  metricKey: string;  // 远端返回 {date, value}；前端 reshape 成 {date, [metricKey]: value} 以兼容 buildOption
+};
+
 function DrillChart({
   rows,
   buildOption,
-  defaultWindow = 0
+  defaultWindow = 0,
+  compareEndpoint
 }: {
   rows: AnyRecord[];
   buildOption: (slice: DrillWindowSlice) => unknown;
   defaultWindow?: number;
+  compareEndpoint?: CompareEndpoint;
 }) {
   const [windowSize, setWindowSize] = React.useState(defaultWindow);
-  const [compare, setCompare] = React.useState(false);
-  const slice = sliceDrillWindow(rows, windowSize, compare);
-  const option = buildOption(slice);
+  const [preset, setPreset] = React.useState<ComparePreset>("");
+  const [remoteCompare, setRemoteCompare] = React.useState<AnyRecord[] | null>(null);
+  const [remoteLoading, setRemoteLoading] = React.useState(false);
+
+  const localSlice = sliceDrillWindow(rows, windowSize, preset === "prev");
+  const mainStart = localSlice.main[0]?.date as string | undefined;
+  const mainEnd = localSlice.main[localSlice.main.length - 1]?.date as string | undefined;
+  const canPrev = localSlice.windowSize * 2 <= rows.length;
+  const remoteAvailable = Boolean(compareEndpoint && mainStart && mainEnd);
+
+  React.useEffect(() => {
+    if (!remoteAvailable || !compareEndpoint || preset === "" || preset === "prev") {
+      setRemoteCompare(null);
+      setRemoteLoading(false);
+      return;
+    }
+    setRemoteLoading(true);
+    const ctrl = new AbortController();
+    const params = new URLSearchParams({
+      view: compareEndpoint.view,
+      metric: compareEndpoint.metric,
+      start: String(mainStart),
+      end: String(mainEnd),
+      preset
+    });
+    fetch(`/api/history/compare?${params}`, { signal: ctrl.signal })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((json) => {
+        const days = (json.compare?.days || []) as Array<{ date: string; value: number | null }>;
+        const remapped = days.map((d) => ({ date: d.date, [compareEndpoint.metricKey]: d.value }));
+        setRemoteCompare(remapped);
+        setRemoteLoading(false);
+      })
+      .catch((e) => {
+        if (e.name !== "AbortError") {
+          setRemoteCompare([]);
+          setRemoteLoading(false);
+        }
+      });
+    return () => ctrl.abort();
+  }, [preset, mainStart, mainEnd, remoteAvailable, compareEndpoint?.view, compareEndpoint?.metric, compareEndpoint?.metricKey]);
+
+  // 自动回退：若用户选择 prev 但前段不足，强制回到关闭
+  React.useEffect(() => {
+    if (preset === "prev" && !canPrev) setPreset("");
+  }, [preset, canPrev]);
+
+  const finalCompare = preset === "prev"
+    ? localSlice.compare
+    : (preset === "WoW" || preset === "MoM" || preset === "YoY")
+      ? remoteCompare
+      : null;
+
+  const sliceForBuild: DrillWindowSlice = {
+    main: localSlice.main,
+    compare: finalCompare,
+    windowSize: localSlice.windowSize
+  };
+  const option = buildOption(sliceForBuild);
+  const remoteEmpty = Boolean(
+    (preset === "WoW" || preset === "MoM" || preset === "YoY") && !remoteLoading && remoteCompare && remoteCompare.length === 0
+  );
+
   return (
     <div className="drillChartWrap">
       <DrillToolbar
         total={rows.length}
-        windowSize={slice.windowSize}
+        windowSize={localSlice.windowSize}
         setWindowSize={setWindowSize}
-        compare={compare}
-        setCompare={setCompare}
+        preset={preset}
+        setPreset={setPreset}
+        canPrev={canPrev}
+        remoteAvailable={remoteAvailable}
+        remoteLoading={remoteLoading}
+        remoteEmpty={remoteEmpty}
       />
       <EChart height={420} option={option} />
     </div>
@@ -875,9 +970,9 @@ function ProductView({ data }: { data: AnyRecord }) {
   const daily = (data.daily as AnyRecord[]) || [];
   const drillConfig =
     drilldown === "payDaily"
-      ? { title: "全店支付金额分日走势", build: (s: DrillWindowSlice) => dailyPayOption(s.main, s.compare) }
+      ? { title: "全店支付金额分日走势", build: (s: DrillWindowSlice) => dailyPayOption(s.main, s.compare), endpoint: { view: "product" as const, metric: "pay", metricKey: "pay" } }
       : drilldown === "netFeeDaily"
-        ? { title: "全店净费比分日走势", build: (s: DrillWindowSlice) => dailyNetFeeOption(s.main, s.compare) }
+        ? { title: "全店净费比分日走势", build: (s: DrillWindowSlice) => dailyNetFeeOption(s.main, s.compare), endpoint: { view: "product" as const, metric: "netFeeRatio", metricKey: "netFeeRatio" } }
         : null;
   const columns: ColumnDef<AnyRecord>[] = [
     { key: "subjectCode", label: "主体编码", width: "300px" },
@@ -926,7 +1021,7 @@ function ProductView({ data }: { data: AnyRecord }) {
               <span>关闭</span>
             </button>
           </div>
-          <DrillChart rows={daily} buildOption={drillConfig.build} />
+          <DrillChart rows={daily} buildOption={drillConfig.build} compareEndpoint={drillConfig.endpoint} />
         </div>
       )}
       <div className="panel">
@@ -978,11 +1073,11 @@ function AdProductsView({ data }: { data: AnyRecord }) {
   const planTable = (data.planTable as AnyRecord[]) || [];
   const drillConfig =
     drilldown === "spendDaily"
-      ? { title: "推广花费分日走势", build: (s: DrillWindowSlice) => dailySpendOption(s.main, s.compare) }
+      ? { title: "推广花费分日走势", build: (s: DrillWindowSlice) => dailySpendOption(s.main, s.compare), endpoint: { view: "ad" as const, metric: "spend", metricKey: "spend" } }
       : drilldown === "gmvDaily"
-        ? { title: "推广成交金额分日走势", build: (s: DrillWindowSlice) => dailyGmvOption(s.main, s.compare) }
+        ? { title: "推广成交金额分日走势", build: (s: DrillWindowSlice) => dailyGmvOption(s.main, s.compare), endpoint: { view: "ad" as const, metric: "gmv", metricKey: "gmv" } }
         : drilldown === "roiDaily"
-          ? { title: "推广整体投产分日走势", build: (s: DrillWindowSlice) => dailyRoiOption(s.main, s.compare) }
+          ? { title: "推广整体投产分日走势", build: (s: DrillWindowSlice) => dailyRoiOption(s.main, s.compare), endpoint: { view: "ad" as const, metric: "roi", metricKey: "roi" } }
           : null;
   const columns: ColumnDef<AnyRecord>[] = [
     { key: "planCode", label: "计划编码", width: "520px" },
@@ -1031,7 +1126,7 @@ function AdProductsView({ data }: { data: AnyRecord }) {
               <span>关闭</span>
             </button>
           </div>
-          <DrillChart rows={daily} buildOption={drillConfig.build} />
+          <DrillChart rows={daily} buildOption={drillConfig.build} compareEndpoint={drillConfig.endpoint} />
         </div>
       )}
       <div className="splitGrid">
@@ -1091,7 +1186,7 @@ function KeywordView({ data }: { data: AnyRecord }) {
   const summary = data.summary as AnyRecord;
   const table = (data.table as AnyRecord[]) || [];
   const daily = (data.daily as AnyRecord[]) || [];
-  const drillConfig = drilldown === "spendDaily" ? { title: "关键词花费分日走势", build: (s: DrillWindowSlice) => dailySpendOption(s.main, s.compare) } : null;
+  const drillConfig = drilldown === "spendDaily" ? { title: "关键词花费分日走势", build: (s: DrillWindowSlice) => dailySpendOption(s.main, s.compare), endpoint: { view: "ad" as const, metric: "spend", metricKey: "spend" } } : null;
   const columns = keywordColumns("keywordCode");
 
   return (
@@ -1119,7 +1214,7 @@ function KeywordView({ data }: { data: AnyRecord }) {
               <span>关闭</span>
             </button>
           </div>
-          <DrillChart rows={daily} buildOption={drillConfig.build} />
+          <DrillChart rows={daily} buildOption={drillConfig.build} compareEndpoint={drillConfig.endpoint} />
         </div>
       )}
       <div className="threeGrid">
@@ -1161,7 +1256,7 @@ function CrowdView({ data }: { data: AnyRecord }) {
   const summary = data.summary as AnyRecord;
   const table = (data.table as AnyRecord[]) || [];
   const daily = (data.daily as AnyRecord[]) || [];
-  const drillConfig = drilldown === "spendDaily" ? { title: "人群花费分日走势", build: (s: DrillWindowSlice) => dailySpendOption(s.main, s.compare) } : null;
+  const drillConfig = drilldown === "spendDaily" ? { title: "人群花费分日走势", build: (s: DrillWindowSlice) => dailySpendOption(s.main, s.compare), endpoint: { view: "ad" as const, metric: "spend", metricKey: "spend" } } : null;
   const columns = keywordColumns("crowdCode");
 
   return (
@@ -1189,7 +1284,7 @@ function CrowdView({ data }: { data: AnyRecord }) {
               <span>关闭</span>
             </button>
           </div>
-          <DrillChart rows={daily} buildOption={drillConfig.build} />
+          <DrillChart rows={daily} buildOption={drillConfig.build} compareEndpoint={drillConfig.endpoint} />
         </div>
       )}
       <div className="splitGrid">
@@ -1227,7 +1322,7 @@ function ContentView({ data }: { data: AnyRecord }) {
   const summary = data.summary as AnyRecord;
   const table = (data.table as AnyRecord[]) || [];
   const daily = (data.daily as AnyRecord[]) || [];
-  const drillConfig = drilldown === "spendDaily" ? { title: "内容花费分日走势", build: (s: DrillWindowSlice) => dailySpendOption(s.main, s.compare) } : null;
+  const drillConfig = drilldown === "spendDaily" ? { title: "内容花费分日走势", build: (s: DrillWindowSlice) => dailySpendOption(s.main, s.compare), endpoint: { view: "ad" as const, metric: "spend", metricKey: "spend" } } : null;
   const columns = keywordColumns("contentCode");
 
   return (
@@ -1255,7 +1350,7 @@ function ContentView({ data }: { data: AnyRecord }) {
               <span>关闭</span>
             </button>
           </div>
-          <DrillChart rows={daily} buildOption={drillConfig.build} />
+          <DrillChart rows={daily} buildOption={drillConfig.build} compareEndpoint={drillConfig.endpoint} />
         </div>
       )}
       <div className="panel">

@@ -21,12 +21,14 @@ import {
   sourceUploadSlots
 } from "./metrics.js";
 import {
+  computeCompareRange,
   getCoverage,
   ingestUpload,
   iterateTableRaw,
   listUploads,
   queryAdSummary,
   queryProductHistory,
+  querySeries,
   tableExportName
 } from "./history.js";
 import { ZipArchive } from "archiver";
@@ -373,6 +375,39 @@ app.get("/api/history/ad-summary", (req, res, next) => {
     const start = typeof req.query.start === "string" ? req.query.start : "";
     const end = typeof req.query.end === "string" ? req.query.end : "";
     res.json(queryAdSummary({ start, end }));
+  } catch (e) { next(e); }
+});
+
+// P2.1 同比/环比：返回主段 + 对比段（按 preset 自动算或自定义起止）的日序列
+app.get("/api/history/compare", (req, res, next) => {
+  try {
+    const view = req.query.view === "product" ? "product" : "ad";
+    const metric = typeof req.query.metric === "string" ? req.query.metric : "spend";
+    const start = typeof req.query.start === "string" ? req.query.start : "";
+    const end = typeof req.query.end === "string" ? req.query.end : "";
+    const preset = typeof req.query.preset === "string" ? req.query.preset : "";
+    const compareStart = typeof req.query.compareStart === "string" ? req.query.compareStart : "";
+    const compareEnd = typeof req.query.compareEnd === "string" ? req.query.compareEnd : "";
+
+    const main = querySeries({ view, metric, start, end });
+    let compareInfo = null;
+    let compare = null;
+    if (preset === "custom" && compareStart && compareEnd) {
+      compareInfo = { start: compareStart, end: compareEnd, preset: "custom" };
+      compare = querySeries({ view, metric, start: compareStart, end: compareEnd });
+    } else if (preset && preset !== "none") {
+      const range = computeCompareRange(start, end, preset);
+      if (range) {
+        compareInfo = { ...range, preset };
+        compare = querySeries({ view, metric, ...range });
+      }
+    }
+    res.json({
+      view,
+      metric,
+      main: { start, end, days: main },
+      compare: compareInfo ? { ...compareInfo, days: compare || [] } : null
+    });
   } catch (e) { next(e); }
 });
 

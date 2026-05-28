@@ -442,6 +442,103 @@ const tableOrderBy = {
   crowd: "date ASC, crowd_key ASC, plan_id ASC"
 };
 
+// ---- P2.1 同比/环比：从 SQLite 拉指定区间的日聚合指标 ----
+
+// view = "ad" 走 adItem+content 合并；"product" 走 product_daily 聚合
+// metric 字段决定算什么；返回 [{date, value}]
+export function querySeries({ view, metric, start, end }) {
+  const conn = ensureDb();
+  const where = ["date IS NOT NULL"];
+  const params = {};
+  if (start) { where.push("date >= @start"); params.start = start; }
+  if (end) { where.push("date <= @end"); params.end = end; }
+
+  if (view === "ad") {
+    // 全店推广：adItem+content union 后按日 sum
+    let valueExpr;
+    switch (metric) {
+      case "spend": valueExpr = "SUM(spend)"; break;
+      case "gmv": valueExpr = "SUM(gmv)"; break;
+      case "roi": valueExpr = "CASE WHEN SUM(spend)=0 THEN NULL ELSE SUM(gmv)*1.0/SUM(spend) END"; break;
+      case "clicks": valueExpr = "SUM(clicks)"; break;
+      case "orders": valueExpr = "SUM(orders)"; break;
+      default: valueExpr = "SUM(spend)";
+    }
+    return conn
+      .prepare(
+        `SELECT date, ${valueExpr} AS value FROM (
+           SELECT date, spend, gmv, clicks, orders FROM ad_item WHERE ${where.join(" AND ")}
+           UNION ALL
+           SELECT date, spend, gmv, clicks, orders FROM content WHERE ${where.join(" AND ")}
+         ) GROUP BY date ORDER BY date ASC`
+      )
+      .all(params);
+  }
+
+  // view = product
+  // 部分指标涉及 ad spend / refund，需要 join 全店推广花费日聚合
+  let select;
+  switch (metric) {
+    case "pay": select = "SUM(payment) AS value"; break;
+    case "refund": select = "SUM(refund) AS value"; break;
+    case "refundRatio": select = "CASE WHEN SUM(payment)=0 THEN NULL ELSE SUM(refund)*1.0/SUM(payment) END AS value"; break;
+    case "visitors": select = "SUM(visitors) AS value"; break;
+    case "netFeeRatio":
+      // 分子 = 全店 ad spend；分母 = 全店净支付（pay - refund）
+      // SQLite 子查询易读：先按日 join
+      return conn
+        .prepare(
+          `SELECT p.date,
+             CASE WHEN (p.pay - p.refund)=0 THEN NULL
+                  ELSE a.spend*1.0 / (p.pay - p.refund) END AS value
+           FROM (
+             SELECT date, SUM(payment) AS pay, SUM(refund) AS refund
+             FROM product_daily WHERE ${where.join(" AND ")} GROUP BY date
+           ) p
+           LEFT JOIN (
+             SELECT date, SUM(spend) AS spend FROM (
+               SELECT date, spend FROM ad_item WHERE ${where.join(" AND ")}
+               UNION ALL
+               SELECT date, spend FROM content WHERE ${where.join(" AND ")}
+             ) GROUP BY date
+           ) a ON a.date = p.date
+           ORDER BY p.date ASC`
+        )
+        .all(params);
+    default: select = "SUM(payment) AS value";
+  }
+  return conn
+    .prepare(`SELECT date, ${select} FROM product_daily WHERE ${where.join(" AND ")} GROUP BY date ORDER BY date ASC`)
+    .all(params);
+}
+
+// 计算对比段时间范围
+export function computeCompareRange(start, end, preset) {
+  if (!start || !end) return null;
+  if (preset === "custom") return null;  // 调用方应该自己传 compareStart/compareEnd
+  const startMs = Date.parse(`${start}T00:00:00Z`);
+  const endMs = Date.parse(`${end}T00:00:00Z`);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return null;
+  const toIso = (ms) => new Date(ms).toISOString().slice(0, 10);
+  switch (preset) {
+    case "WoW": {
+      const offset = 7 * 86400 * 1000;
+      return { start: toIso(startMs - offset), end: toIso(endMs - offset) };
+    }
+    case "MoM": {
+      // 近似按 30 天往前
+      const offset = 30 * 86400 * 1000;
+      return { start: toIso(startMs - offset), end: toIso(endMs - offset) };
+    }
+    case "YoY": {
+      const offset = 365 * 86400 * 1000;
+      return { start: toIso(startMs - offset), end: toIso(endMs - offset) };
+    }
+    default:
+      return null;
+  }
+}
+
 export function* iterateTableRaw(table, { start, end }) {
   const conn = ensureDb();
   const where = ["raw_json IS NOT NULL"];
