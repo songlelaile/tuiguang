@@ -487,6 +487,16 @@ export async function buildProductView(range = {}) {
   }
   const totalAdSpend = [...adSpendByDate.values()].reduce((sum, v) => sum + v, 0);
 
+  // 按商品ID 聚合 adItem 花费（只 adItem 表的"主体类型=商品"行能 join 到 product 表
+  // content 表"主体类型=短视频"，主体ID 是内容ID，无法可靠分摊到单品）
+  const adItemSpendByItemId = new Map();
+  const adItemRowsFiltered = filterRows(adItem, range, "日期", ["主体名称", "计划名字", "场景名字"]);
+  for (const row of adItemRowsFiltered) {
+    if (row["主体类型"] !== "商品" || !row["主体ID"]) continue;
+    const id = String(row["主体ID"]);
+    adItemSpendByItemId.set(id, (adItemSpendByItemId.get(id) || 0) + cleanNumber(row["花费"]));
+  }
+
   const groups = new Map();
 
   for (const row of rows) {
@@ -518,8 +528,9 @@ export async function buildProductView(range = {}) {
 
   const table = [...groups.values()].map((row) => {
     const pay = cleanNumber(row["支付金额"]);
-    const spend = cleanNumber(row["推广消耗"]);
     const refund = cleanNumber(row["成功退款金额"]);
+    // 推广消耗：用 adItem 表按主体ID 聚合的实际花费，覆盖 product 表自带的空字段
+    const itemSpend = adItemSpendByItemId.get(row.itemId) || 0;
     return enrichProductMetrics({
       subjectCode: row.subjectCode,
       "支付金额": pay,
@@ -530,10 +541,10 @@ export async function buildProductView(range = {}) {
       "商品加购人数": row["商品加购人数"],
       "商品访客数": row["商品访客数"],
       "商品浏览量": row["商品浏览量"],
-      "推广消耗": spend,
+      "推广消耗": round(itemSpend, 2) || 0,
       annualPay: round(row["年累计支付金额"], 2),
       annualPayShare: round(div(row["支付金额"], row["年累计支付金额"]), 4),
-      feeRatio: round(div(row["推广消耗"], row["支付金额"]), 4),
+      feeRatio: round(div(itemSpend, pay), 4),
       avgStay: round(div(row["平均停留时长_sum"], row["平均停留时长_count"]), 2)
     });
   });
@@ -541,7 +552,8 @@ export async function buildProductView(range = {}) {
   sortBy(table, "pay");
   const totalPay = table.reduce((sum, row) => sum + cleanNumber(row.pay), 0);
   const totalRefund = table.reduce((sum, row) => sum + cleanNumber(row["成功退款金额"]), 0);
-  const totalSpend = table.reduce((sum, row) => sum + cleanNumber(row["推广消耗"]), 0);
+  const allocatedSpend = table.reduce((sum, row) => sum + cleanNumber(row["推广消耗"]), 0);
+  const promotedItemCount = table.filter((row) => cleanNumber(row["推广消耗"]) > 0).length;
   const treemap = table.map((row) => ({
     name: row.subjectCode,
     value: row.pay,
@@ -592,10 +604,13 @@ export async function buildProductView(range = {}) {
     summary: {
       rows: rows.length,
       groups: table.length,
+      promotedItemCount,
       totalPay: round(totalPay, 2),
       totalRefund: round(totalRefund, 2),
       totalSpend: round(totalAdSpend, 2),
-      productTableSpend: round(totalSpend, 2),
+      allocatedSpend: round(allocatedSpend, 2),
+      unallocatedSpend: round(totalAdSpend - allocatedSpend, 2),
+      productTableSpend: 0,
       topShare: table[0] ? round(div(table[0].pay, totalPay), 4) : null,
       refundRatio: round(div(totalRefund, totalPay), 4),
       netFeeRatio: round(div(totalAdSpend, totalPay - totalRefund), 4),
