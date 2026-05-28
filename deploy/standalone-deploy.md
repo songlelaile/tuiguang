@@ -103,14 +103,19 @@ docker compose ps
 
 镜像层缓存生效，`npm ci` 不会重跑。常规更新 1~2 分钟。
 
-## 备份 uploads
+## 备份 uploads + 历史库
+
+⚠️ **从 P1 起新增了 SQLite 历史库**（默认 `/var/lib/tuiguang/data/history.sqlite`），
+里面是长期累积的所有上传数据。必须跟 uploads 一起备份，丢了等于历史数据丢了。
+
+`deploy/backup.sh` 已经支持同时打包 uploads + data 两个目录。
 
 每天定时跑：
 
 ```bash
 sudo crontab -e
-# 加一行：每天 03:00 备份，保留 14 份
-0 3 * * * cd /opt/tuiguang && UPLOADS_HOST_DIR=/var/lib/tuiguang/uploads BACKUP_DIR=/var/backups/tuiguang KEEP=14 /opt/tuiguang/deploy/backup.sh >> /var/log/tuiguang-backup.log 2>&1
+# 加一行：每天 03:00 备份 uploads + data（含历史库），保留 14 份
+0 3 * * * cd /opt/tuiguang && UPLOADS_HOST_DIR=/var/lib/tuiguang/uploads DATA_HOST_DIR=/var/lib/tuiguang/data BACKUP_DIR=/var/backups/tuiguang KEEP=14 /opt/tuiguang/deploy/backup.sh >> /var/log/tuiguang-backup.log 2>&1
 ```
 
 手动跑一次确认：

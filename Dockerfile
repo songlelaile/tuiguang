@@ -3,6 +3,8 @@
 # ---- build dist ----
 FROM node:20-alpine AS builder
 WORKDIR /app
+# better-sqlite3 is a native module; alpine needs python + make + g++ to compile
+RUN apk add --no-cache python3 make g++
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
@@ -13,15 +15,18 @@ FROM node:20-alpine AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 
-RUN apk add --no-cache tini wget
+# tini + wget for HEALTHCHECK; python3/make/g++ kept only during npm ci for better-sqlite3
+RUN apk add --no-cache tini wget python3 make g++
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+RUN npm ci --omit=dev && npm cache clean --force \
+ && apk del python3 make g++
 
 COPY --from=builder /app/dist ./dist
 COPY server ./server
 
-RUN mkdir -p /app/uploads/source-data /app/data/source-data \
+# uploads is for raw source files, data is for SQLite history db
+RUN mkdir -p /app/uploads/source-data /app/data \
  && chown -R node:node /app
 
 USER node

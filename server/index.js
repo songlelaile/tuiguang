@@ -14,11 +14,13 @@ import {
   buildMeta,
   buildProductView,
   clearSourceData,
+  getRawSnapshot,
   getUploadedSourcePath,
   getUploadDir,
   resetRawCache,
   sourceUploadSlots
 } from "./metrics.js";
+import { getCoverage, ingestUpload, listUploads, queryAdSummary, queryProductHistory } from "./history.js";
 
 const app = express();
 const port = Number(process.env.PORT || 5174);
@@ -131,6 +133,25 @@ app.post(
       resetRawCache();
       const meta = await buildMeta();
       await Promise.all(backups.map((backup) => fs.rm(backup.backupPath, { force: true })));
+
+      // P1.2 异步双写到 SQLite 历史库；失败 log 不影响上传成功
+      getRawSnapshot()
+        .then((raw) => {
+          try {
+            const result = ingestUpload({
+              product: raw.product || [],
+              adItem: raw.adItem || [],
+              content: raw.content || [],
+              keyword: raw.keyword || [],
+              crowd: raw.crowd || []
+            });
+            console.log(`[history] upload #${result.uploadId} ingested, range ${result.dateMin} ~ ${result.dateMax}`);
+          } catch (err) {
+            console.error("[history] ingest failed:", err.message);
+          }
+        })
+        .catch((err) => console.error("[history] snapshot failed:", err.message));
+
       res.json({ ok: true, updated: moved, meta });
     } catch (error) {
       await Promise.all(moved.map((item) => fs.rm(item.file, { force: true })));
@@ -316,6 +337,35 @@ app.get("/api/crowds/export", async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// ---- P1.3 History (跨周期) ----
+app.get("/api/history/coverage", (_req, res, next) => {
+  try { res.json(getCoverage()); } catch (e) { next(e); }
+});
+
+app.get("/api/history/uploads", (req, res, next) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 50, 500);
+    res.json(listUploads(limit));
+  } catch (e) { next(e); }
+});
+
+app.get("/api/history/product", (req, res, next) => {
+  try {
+    const start = typeof req.query.start === "string" ? req.query.start : "";
+    const end = typeof req.query.end === "string" ? req.query.end : "";
+    const itemId = typeof req.query.itemId === "string" ? req.query.itemId : "";
+    res.json(queryProductHistory({ start, end, itemId }));
+  } catch (e) { next(e); }
+});
+
+app.get("/api/history/ad-summary", (req, res, next) => {
+  try {
+    const start = typeof req.query.start === "string" ? req.query.start : "";
+    const end = typeof req.query.end === "string" ? req.query.end : "";
+    res.json(queryAdSummary({ start, end }));
+  } catch (e) { next(e); }
+});
+
 app.get("/api/contents/export", async (req, res, next) => {
   try {
     const range = queryRange(req);
@@ -360,6 +410,29 @@ app.use((error, _req, res, _next) => {
   });
 });
 
+// 启动时自动 seed：如果历史库是空但 uploads 有数据，导入一次
+async function autoSeedHistory() {
+  try {
+    const cov = getCoverage();
+    if (cov.uploads > 0) return;
+    const raw = await getRawSnapshot();
+    const hasData = (raw.product?.length || 0) + (raw.adItem?.length || 0) > 0;
+    if (!hasData) return;
+    const result = ingestUpload({
+      product: raw.product || [],
+      adItem: raw.adItem || [],
+      content: raw.content || [],
+      keyword: raw.keyword || [],
+      crowd: raw.crowd || [],
+      note: "auto-seed on startup (history db was empty)"
+    });
+    console.log(`[history] auto-seed upload #${result.uploadId}, range ${result.dateMin} ~ ${result.dateMax}`);
+  } catch (e) {
+    console.error("[history] auto-seed failed:", e.message);
+  }
+}
+
 app.listen(port, host, () => {
   console.log(`huopan-bi-api listening on http://${host}:${port}`);
+  autoSeedHistory();
 });

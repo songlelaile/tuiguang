@@ -13,10 +13,12 @@ services:
       HOST: 0.0.0.0
       HUOPAN_UPLOAD_DIR: /app/uploads/source-data
       HUOPAN_DATA_DIR: /app/data/source-data
+      HUOPAN_HISTORY_DB: /app/data/history.sqlite
       UPLOAD_MAX_MB: ${UPLOAD_MAX_MB:-100}
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
       - ${UPLOADS_HOST_DIR:-./uploads}:/app/uploads
+      - ${DATA_HOST_DIR:-./data}:/app/data
     ports:
       # 仅绑宿主机 loopback，由主服务器 nginx 反代过来；不直接对公网暴露
       - "127.0.0.1:${APP_BIND_PORT:-5180}:5174"

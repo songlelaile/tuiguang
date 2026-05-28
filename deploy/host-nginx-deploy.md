@@ -84,11 +84,13 @@ UPLOAD_MAX_MB=100
 TZ=Asia/Shanghai
 ```
 
-准备 uploads 目录：
+准备 uploads + 历史库目录：
 ```bash
-sudo mkdir -p /var/lib/tuiguang/uploads
-sudo chown 1000:1000 /var/lib/tuiguang/uploads
+sudo mkdir -p /var/lib/tuiguang/uploads /var/lib/tuiguang/data
+sudo chown -R 1000:1000 /var/lib/tuiguang   # 容器内 node 用户 UID 1000
 ```
+
+> P1 起新增 SQLite 历史库（`/var/lib/tuiguang/data/history.sqlite`），跟 uploads 一样必须挂卷持久化 + 备份。
 
 启动 app 容器（**注意：不带 `--profile standalone`，所以容器内 nginx 不启**）：
 ```bash
@@ -183,9 +185,15 @@ docker compose ps
 
 主 nginx 配置不需要重启。Let's Encrypt 证书 certbot 自带 systemd timer 自动续签，无需手动。
 
-## 备份 uploads
+## 备份 uploads + 历史库
 
-参见 `deploy/standalone-deploy.md` 里的备份段落，命令完全一致。
+```bash
+sudo crontab -e
+# 加一行：每天 03:00 备份 uploads + data（含 SQLite 历史库），保留 14 份
+0 3 * * * cd /opt/tuiguang && UPLOADS_HOST_DIR=/var/lib/tuiguang/uploads DATA_HOST_DIR=/var/lib/tuiguang/data BACKUP_DIR=/var/backups/tuiguang KEEP=14 /opt/tuiguang/deploy/backup.sh >> /var/log/tuiguang-backup.log 2>&1
+```
+
+⚠️ data 目录里是长期累积的历史数据库，丢了不能恢复，务必纳入异地备份。
 
 ## 回滚
 

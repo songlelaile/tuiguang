@@ -220,6 +220,11 @@ async function safeRead(source, reader) {
   return reader(source.file);
 }
 
+// P1.2 暴露 raw 数据快照给历史库入库流程
+export async function getRawSnapshot() {
+  return loadRaw();
+}
+
 async function loadRaw() {
   if (rawCache) return rawCache;
   const sources = await resolveSourceFiles();
