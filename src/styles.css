@@ -862,6 +862,106 @@ tbody tr:hover td {
   margin-left: 4px;
 }
 
+.exportButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1px solid rgba(245, 200, 119, 0.45);
+  border-radius: 8px;
+  background: rgba(245, 200, 119, 0.08);
+  color: #f5c877;
+  font-size: 13px;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background-color 0.16s ease, transform 0.06s ease;
+  white-space: nowrap;
+}
+
+.exportButton::before {
+  content: "⬇";
+  font-size: 14px;
+  line-height: 1;
+}
+
+.exportButton:hover {
+  background: rgba(245, 200, 119, 0.18);
+}
+
+.exportButton:active {
+  transform: translateY(1px);
+}
+
+/* DrillChart 时间窗口 + 对比工具栏 */
+.drillChartWrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.drillToolbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 6px 0 2px;
+  border-bottom: 1px dashed rgba(245, 200, 119, 0.12);
+}
+
+.drillWindowGroup {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  background: rgba(245, 240, 223, 0.05);
+  border-radius: 8px;
+}
+
+.drillWindowBtn {
+  background: transparent;
+  border: 0;
+  padding: 5px 12px;
+  border-radius: 6px;
+  color: rgba(245, 240, 223, 0.7);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color 0.14s, color 0.14s;
+}
+
+.drillWindowBtn:hover {
+  color: #f5f0df;
+}
+
+.drillWindowBtn.active {
+  background: rgba(245, 200, 119, 0.22);
+  color: #f5c877;
+}
+
+.drillCompareToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: rgba(245, 240, 223, 0.78);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.drillCompareToggle.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.drillCompareToggle input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: #f5c877;
+  cursor: pointer;
+}
+
+.drillCompareToggle.disabled input[type="checkbox"] {
+  cursor: not-allowed;
+}
+
 @media (max-width: 960px) {
   .timelineRow {
     grid-template-columns: 80px 1fr;

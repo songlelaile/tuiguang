@@ -89,6 +89,118 @@ function viewFromHash(): ViewKey {
   return navItems.some((item) => item.key === key) ? (key as ViewKey) : "product";
 }
 
+// ---- P0.2 时间窗口 + 上一周期对比 -----------------------------------------
+
+function DrillToolbar({
+  total,
+  windowSize,
+  setWindowSize,
+  compare,
+  setCompare,
+  presets = [7, 14, 30]
+}: {
+  total: number;
+  windowSize: number;
+  setWindowSize: (n: number) => void;
+  compare: boolean;
+  setCompare: (b: boolean) => void;
+  presets?: number[];
+}) {
+  // 自动算可用 preset：去重 + 不超过 total
+  const options = Array.from(new Set([...presets.filter((p) => p < total), total])).sort((a, b) => a - b);
+  const canCompare = windowSize > 0 && windowSize * 2 <= total;
+  return (
+    <div className="drillToolbar">
+      <div className="drillWindowGroup">
+        {options.map((w) => (
+          <button
+            key={w}
+            type="button"
+            className={`drillWindowBtn ${w === windowSize ? "active" : ""}`}
+            onClick={() => setWindowSize(w)}
+          >
+            {w === total ? `全部 ${total} 天` : `近 ${w} 天`}
+          </button>
+        ))}
+      </div>
+      <label className={`drillCompareToggle ${canCompare ? "" : "disabled"}`} title={canCompare ? "" : "前段数据不足，无法对比"}>
+        <input
+          type="checkbox"
+          checked={compare && canCompare}
+          disabled={!canCompare}
+          onChange={(e) => setCompare(e.target.checked)}
+        />
+        <span>对比前一周期</span>
+      </label>
+    </div>
+  );
+}
+
+type DrillWindowSlice = {
+  main: AnyRecord[];
+  compare: AnyRecord[] | null;
+  windowSize: number;  // 实际使用的窗口长度
+};
+
+function sliceDrillWindow(rows: AnyRecord[], windowSize: number, compare: boolean): DrillWindowSlice {
+  const total = rows.length;
+  const actual = windowSize > 0 && windowSize < total ? windowSize : total;
+  const main = actual >= total ? rows : rows.slice(-actual);
+  const compareRows = compare && actual * 2 <= total ? rows.slice(-actual * 2, -actual) : null;
+  return { main, compare: compareRows, windowSize: actual };
+}
+
+function buildCompareLineSeries(
+  name: string,
+  compareRows: AnyRecord[] | null,
+  mainLength: number,
+  getValue: (row: AnyRecord) => number | null,
+  options: { color?: string; yAxisIndex?: number } = {}
+): unknown[] {
+  if (!compareRows || !compareRows.length) return [];
+  const padding = Array(Math.max(0, mainLength - compareRows.length)).fill(null);
+  const values = compareRows.map(getValue);
+  return [
+    {
+      name: `对比·${name}`,
+      type: "line",
+      smooth: true,
+      symbol: "none",
+      yAxisIndex: options.yAxisIndex ?? 0,
+      lineStyle: { color: options.color || "rgba(245, 240, 223, 0.5)", width: 2, type: "dashed" },
+      itemStyle: { color: options.color || "rgba(245, 240, 223, 0.5)" },
+      data: [...padding, ...values]
+    }
+  ];
+}
+
+function DrillChart({
+  rows,
+  buildOption,
+  defaultWindow = 0
+}: {
+  rows: AnyRecord[];
+  buildOption: (slice: DrillWindowSlice) => unknown;
+  defaultWindow?: number;
+}) {
+  const [windowSize, setWindowSize] = React.useState(defaultWindow);
+  const [compare, setCompare] = React.useState(false);
+  const slice = sliceDrillWindow(rows, windowSize, compare);
+  const option = buildOption(slice);
+  return (
+    <div className="drillChartWrap">
+      <DrillToolbar
+        total={rows.length}
+        windowSize={slice.windowSize}
+        setWindowSize={setWindowSize}
+        compare={compare}
+        setCompare={setCompare}
+      />
+      <EChart height={420} option={option} />
+    </div>
+  );
+}
+
 const productWeeklyMetrics: WeeklyMetric[] = [
   { key: "pay", label: "支付金额", format: fmtMoney },
   { key: "visitors", label: "商品访客", format: fmtInt },
@@ -255,6 +367,16 @@ function App() {
               <span>搜索</span>
               <input value={filters.q} placeholder="商品 / 计划 / 人群 / 词" onChange={(event) => setFilters((prev) => ({ ...prev, q: event.target.value }))} />
             </label>
+            {endpoints[active] && (
+              <a
+                className="exportButton"
+                href={`${endpoints[active]}/export${buildQuery(filters)}`}
+                download
+                title="按当前筛选导出 xlsx"
+              >
+                导出 Excel
+              </a>
+            )}
           </div>
         </header>
 
@@ -658,9 +780,9 @@ function ProductView({ data }: { data: AnyRecord }) {
   const daily = (data.daily as AnyRecord[]) || [];
   const drillConfig =
     drilldown === "payDaily"
-      ? { title: "全店支付金额分日走势", option: dailyPayOption(daily) }
+      ? { title: "全店支付金额分日走势", build: (s: DrillWindowSlice) => dailyPayOption(s.main, s.compare) }
       : drilldown === "netFeeDaily"
-        ? { title: "全店净费比分日走势", option: dailyNetFeeOption(daily) }
+        ? { title: "全店净费比分日走势", build: (s: DrillWindowSlice) => dailyNetFeeOption(s.main, s.compare) }
         : null;
   const columns: ColumnDef<AnyRecord>[] = [
     { key: "subjectCode", label: "主体编码", width: "300px" },
@@ -709,7 +831,7 @@ function ProductView({ data }: { data: AnyRecord }) {
               <span>关闭</span>
             </button>
           </div>
-          <EChart height={420} option={drillConfig.option} />
+          <DrillChart rows={daily} buildOption={drillConfig.build} />
         </div>
       )}
       <div className="panel">
@@ -761,11 +883,11 @@ function AdProductsView({ data }: { data: AnyRecord }) {
   const planTable = (data.planTable as AnyRecord[]) || [];
   const drillConfig =
     drilldown === "spendDaily"
-      ? { title: "推广花费分日走势", option: dailySpendOption(daily) }
+      ? { title: "推广花费分日走势", build: (s: DrillWindowSlice) => dailySpendOption(s.main, s.compare) }
       : drilldown === "gmvDaily"
-        ? { title: "推广成交金额分日走势", option: dailyGmvOption(daily) }
+        ? { title: "推广成交金额分日走势", build: (s: DrillWindowSlice) => dailyGmvOption(s.main, s.compare) }
         : drilldown === "roiDaily"
-          ? { title: "推广整体投产分日走势", option: dailyRoiOption(daily) }
+          ? { title: "推广整体投产分日走势", build: (s: DrillWindowSlice) => dailyRoiOption(s.main, s.compare) }
           : null;
   const columns: ColumnDef<AnyRecord>[] = [
     { key: "planCode", label: "计划编码", width: "520px" },
@@ -814,7 +936,7 @@ function AdProductsView({ data }: { data: AnyRecord }) {
               <span>关闭</span>
             </button>
           </div>
-          <EChart height={420} option={drillConfig.option} />
+          <DrillChart rows={daily} buildOption={drillConfig.build} />
         </div>
       )}
       <div className="splitGrid">
@@ -874,7 +996,7 @@ function KeywordView({ data }: { data: AnyRecord }) {
   const summary = data.summary as AnyRecord;
   const table = (data.table as AnyRecord[]) || [];
   const daily = (data.daily as AnyRecord[]) || [];
-  const drillConfig = drilldown === "spendDaily" ? { title: "关键词花费分日走势", option: dailySpendOption(daily) } : null;
+  const drillConfig = drilldown === "spendDaily" ? { title: "关键词花费分日走势", build: (s: DrillWindowSlice) => dailySpendOption(s.main, s.compare) } : null;
   const columns = keywordColumns("keywordCode");
 
   return (
@@ -902,7 +1024,7 @@ function KeywordView({ data }: { data: AnyRecord }) {
               <span>关闭</span>
             </button>
           </div>
-          <EChart height={420} option={drillConfig.option} />
+          <DrillChart rows={daily} buildOption={drillConfig.build} />
         </div>
       )}
       <div className="threeGrid">
@@ -944,7 +1066,7 @@ function CrowdView({ data }: { data: AnyRecord }) {
   const summary = data.summary as AnyRecord;
   const table = (data.table as AnyRecord[]) || [];
   const daily = (data.daily as AnyRecord[]) || [];
-  const drillConfig = drilldown === "spendDaily" ? { title: "人群花费分日走势", option: dailySpendOption(daily) } : null;
+  const drillConfig = drilldown === "spendDaily" ? { title: "人群花费分日走势", build: (s: DrillWindowSlice) => dailySpendOption(s.main, s.compare) } : null;
   const columns = keywordColumns("crowdCode");
 
   return (
@@ -972,7 +1094,7 @@ function CrowdView({ data }: { data: AnyRecord }) {
               <span>关闭</span>
             </button>
           </div>
-          <EChart height={420} option={drillConfig.option} />
+          <DrillChart rows={daily} buildOption={drillConfig.build} />
         </div>
       )}
       <div className="splitGrid">
@@ -1010,7 +1132,7 @@ function ContentView({ data }: { data: AnyRecord }) {
   const summary = data.summary as AnyRecord;
   const table = (data.table as AnyRecord[]) || [];
   const daily = (data.daily as AnyRecord[]) || [];
-  const drillConfig = drilldown === "spendDaily" ? { title: "内容花费分日走势", option: dailySpendOption(daily) } : null;
+  const drillConfig = drilldown === "spendDaily" ? { title: "内容花费分日走势", build: (s: DrillWindowSlice) => dailySpendOption(s.main, s.compare) } : null;
   const columns = keywordColumns("contentCode");
 
   return (
@@ -1038,7 +1160,7 @@ function ContentView({ data }: { data: AnyRecord }) {
               <span>关闭</span>
             </button>
           </div>
-          <EChart height={420} option={drillConfig.option} />
+          <DrillChart rows={daily} buildOption={drillConfig.build} />
         </div>
       )}
       <div className="panel">
@@ -1160,23 +1282,23 @@ function sceneOption(rows: AnyRecord[] = []) {
   };
 }
 
-function dailyPayOption(rows: AnyRecord[] = []) {
-  return dailyMoneyOption(rows, "pay", "支付金额");
+function dailyPayOption(rows: AnyRecord[] = [], compareRows: AnyRecord[] | null = null) {
+  return dailyMoneyOption(rows, "pay", "支付金额", compareRows);
 }
 
-function dailySpendOption(rows: AnyRecord[] = []) {
-  return dailyMoneyOption(rows, "spend", "花费");
+function dailySpendOption(rows: AnyRecord[] = [], compareRows: AnyRecord[] | null = null) {
+  return dailyMoneyOption(rows, "spend", "花费", compareRows);
 }
 
-function dailyGmvOption(rows: AnyRecord[] = []) {
-  return dailyMoneyOption(rows, "gmv", "成交金额");
+function dailyGmvOption(rows: AnyRecord[] = [], compareRows: AnyRecord[] | null = null) {
+  return dailyMoneyOption(rows, "gmv", "成交金额", compareRows);
 }
 
-function dailyRoiOption(rows: AnyRecord[] = []) {
-  return dailyNumberOption(rows, "roi", "投产");
+function dailyRoiOption(rows: AnyRecord[] = [], compareRows: AnyRecord[] | null = null) {
+  return dailyNumberOption(rows, "roi", "投产", compareRows);
 }
 
-function dailyMoneyOption(rows: AnyRecord[] = [], valueKey: string, metricLabel: string) {
+function dailyMoneyOption(rows: AnyRecord[] = [], valueKey: string, metricLabel: string, compareRows: AnyRecord[] | null = null) {
   const dates = rows.map((row) => String(row.date || ""));
   const values = rows.map((row) => Number(row[valueKey]) || 0);
   const startValue = Math.max(0, dates.length - 45);
@@ -1234,12 +1356,13 @@ function dailyMoneyOption(rows: AnyRecord[] = [], valueKey: string, metricLabel:
         itemStyle: { color: "#60c7bc" },
         lineStyle: { color: "#60c7bc", width: 3 },
         data: movingAverage(values, 7)
-      }
+      },
+      ...buildCompareLineSeries(metricLabel, compareRows, dates.length, (r) => Number(r[valueKey]) || 0)
     ]
   };
 }
 
-function dailyNumberOption(rows: AnyRecord[] = [], valueKey: string, metricLabel: string) {
+function dailyNumberOption(rows: AnyRecord[] = [], valueKey: string, metricLabel: string, compareRows: AnyRecord[] | null = null) {
   const dates = rows.map((row) => String(row.date || ""));
   const values = rows.map((row) => {
     const value = Number(row[valueKey]);
@@ -1303,12 +1426,16 @@ function dailyNumberOption(rows: AnyRecord[] = [], valueKey: string, metricLabel
         itemStyle: { color: "#60c7bc" },
         lineStyle: { color: "#60c7bc", width: 3 },
         data: movingAverage(values, 7)
-      }
+      },
+      ...buildCompareLineSeries(metricLabel, compareRows, dates.length, (r) => {
+        const v = Number(r[valueKey]);
+        return Number.isFinite(v) ? v : null;
+      })
     ]
   };
 }
 
-function dailyNetFeeOption(rows: AnyRecord[] = []) {
+function dailyNetFeeOption(rows: AnyRecord[] = [], compareRows: AnyRecord[] | null = null) {
   const dates = rows.map((row) => String(row.date || ""));
   const ratios = rows.map((row) => {
     const value = Number(row.netFeeRatio);
@@ -1423,7 +1550,11 @@ function dailyNetFeeOption(rows: AnyRecord[] = []) {
         itemStyle: { color: "#60c7bc" },
         lineStyle: { color: "#60c7bc", width: 3 },
         data: movingAverage(ratios, 7, 4)
-      }
+      },
+      ...buildCompareLineSeries("净费比", compareRows, dates.length, (r) => {
+        const v = Number(r.netFeeRatio);
+        return Number.isFinite(v) ? v : null;
+      })
     ]
   };
 }

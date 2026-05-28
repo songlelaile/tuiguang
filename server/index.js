@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import multer from "multer";
+import XLSX from "xlsx";
 import {
   buildAdProductsView,
   buildContentView,
@@ -193,6 +194,145 @@ app.get("/api/contents", async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+// ---- P0.3 Excel 导出 ----
+// 把 view 数据塑形成清晰的中文列后输出 xlsx；每个文件含 2 张 sheet：汇总 + 明细
+function sendXlsx(res, sheets, filename) {
+  const wb = XLSX.utils.book_new();
+  for (const [name, rows] of sheets) {
+    if (!rows || !rows.length) continue;
+    const ws = XLSX.utils.json_to_sheet(rows);
+    XLSX.utils.book_append_sheet(wb, ws, name);
+  }
+  const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+  res.send(buf);
+}
+
+function rangeTag(range) {
+  if (range.start && range.end) return `${range.start}_${range.end}`;
+  if (range.start) return `${range.start}起`;
+  if (range.end) return `截至${range.end}`;
+  return "全周期";
+}
+
+app.get("/api/product/export", async (req, res, next) => {
+  try {
+    const range = queryRange(req);
+    const view = await buildProductView(range);
+    const s = view.summary || {};
+    const summary = [
+      { 指标: "商品分组", 数值: s.groups },
+      { 指标: "投了推广的商品数", 数值: s.promotedItemCount },
+      { 指标: "全店支付金额", 数值: s.totalPay },
+      { 指标: "全店退款金额", 数值: s.totalRefund },
+      { 指标: "退款金额占比(%)", 数值: s.refundRatio != null ? (s.refundRatio * 100).toFixed(2) : null },
+      { 指标: "全店推广花费", 数值: s.totalSpend },
+      { 指标: "已分摊推广花费", 数值: s.allocatedSpend },
+      { 指标: "未分摊内容推广", 数值: s.unallocatedSpend },
+      { 指标: "全店净费比(%)", 数值: s.netFeeRatio != null ? (s.netFeeRatio * 100).toFixed(2) : null }
+    ];
+    const detail = (view.table || []).map((row, i) => ({
+      序号: i + 1,
+      主体编码: row.subjectCode,
+      支付金额: row.pay,
+      退款金额: row["成功退款金额"],
+      推广消耗: row["推广消耗"],
+      商品访客数: row.visitors,
+      转化率: row.conversionRate,
+      客单价: row.customerPrice,
+      年累计支付金额: row.annualPay,
+      年累计支付金额占比: row.annualPayShare,
+      费比: row.feeRatio,
+      退款金额占比: row.refundRatio,
+      复购率: row.repeatRate,
+      复购金额占比: row.repeatPayRatio,
+      加购率: row.cartRate,
+      人均浏览量: row.pvPerVisitor,
+      链接净ROI: row.netRoi
+    }));
+    sendXlsx(res, [["汇总", summary], ["商品经营明细", detail]], `商品维度_${rangeTag(range)}.xlsx`);
+  } catch (error) { next(error); }
+});
+
+app.get("/api/ad-products/export", async (req, res, next) => {
+  try {
+    const range = queryRange(req);
+    const view = await buildAdProductsView(range);
+    const s = view.summary || {};
+    const summary = [
+      { 指标: "原始行数", 数值: s.rows },
+      { 指标: "主体数", 数值: s.subjects },
+      { 指标: "计划数", 数值: s.plans },
+      { 指标: "总花费", 数值: s.totalSpend },
+      { 指标: "总GMV", 数值: s.totalGmv },
+      { 指标: "总ROI", 数值: s.roi }
+    ];
+    const detail = (view.planTable || []).map((row, i) => ({
+      序号: i + 1, 计划编码: row.planCode, 花费: row.spend, GMV: row.gmv, ROI: row.roi,
+      CPC: row.cpc, CTR: row.ctr, CVR: row.cvr, 客单价: row.customerPrice, CPM: row.cpm,
+      展现量: row["展现量"], 点击量: row["点击量"], 成交笔数: row["总成交笔数"], 购物车数: row["总购物车数"]
+    }));
+    sendXlsx(res, [["汇总", summary], ["计划维度明细", detail]], `推广商品_${rangeTag(range)}.xlsx`);
+  } catch (error) { next(error); }
+});
+
+app.get("/api/keywords/export", async (req, res, next) => {
+  try {
+    const range = queryRange(req);
+    const view = await buildKeywordView(range);
+    const s = view.summary || {};
+    const summary = [
+      { 指标: "原始行数", 数值: s.rows },
+      { 指标: "关键词分组数", 数值: s.groups },
+      { 指标: "总花费", 数值: s.totalSpend }
+    ];
+    const detail = (view.table || []).map((row, i) => ({
+      序号: i + 1, 关键词编码: row.keywordCode, 词类型: row.type, 词: row.word,
+      花费: row.spend, GMV: row.gmv, ROI: row.roi, CPC: row.cpc, CTR: row.ctr, CVR: row.cvr,
+      平均展现排名: row.avgRank, 展现量: row["展现量"], 点击量: row["点击量"], 成交笔数: row["总成交笔数"]
+    }));
+    sendXlsx(res, [["汇总", summary], ["关键词明细", detail]], `推广关键词_${rangeTag(range)}.xlsx`);
+  } catch (error) { next(error); }
+});
+
+app.get("/api/crowds/export", async (req, res, next) => {
+  try {
+    const range = queryRange(req);
+    const view = await buildCrowdView(range);
+    const s = view.summary || {};
+    const summary = [
+      { 指标: "原始行数", 数值: s.rows },
+      { 指标: "人群分组数", 数值: s.groups },
+      { 指标: "总花费", 数值: s.totalSpend }
+    ];
+    const detail = (view.table || []).map((row, i) => ({
+      序号: i + 1, 人群编码: row.crowdCode, 花费: row.spend, GMV: row.gmv, ROI: row.roi,
+      CPC: row.cpc, CTR: row.ctr, CVR: row.cvr, 展现量: row["展现量"], 点击量: row["点击量"], 成交笔数: row["总成交笔数"]
+    }));
+    sendXlsx(res, [["汇总", summary], ["人群明细", detail]], `推广人群_${rangeTag(range)}.xlsx`);
+  } catch (error) { next(error); }
+});
+
+app.get("/api/contents/export", async (req, res, next) => {
+  try {
+    const range = queryRange(req);
+    const view = await buildContentView(range);
+    const s = view.summary || {};
+    const summary = [
+      { 指标: "原始行数", 数值: s.rows },
+      { 指标: "内容分组数", 数值: s.groups },
+      { 指标: "总花费", 数值: s.totalSpend }
+    ];
+    const detail = (view.table || []).map((row, i) => ({
+      序号: i + 1, 内容编码: row.contentCode, 主体类型: row.type,
+      花费: row.spend, GMV: row.gmv, ROI: row.roi, CPC: row.cpc, CTR: row.ctr, CVR: row.cvr,
+      展现量: row["展现量"], 点击量: row["点击量"], 成交笔数: row["总成交笔数"]
+    }));
+    sendXlsx(res, [["汇总", summary], ["内容明细", detail]], `推广内容_${rangeTag(range)}.xlsx`);
+  } catch (error) { next(error); }
 });
 
 app.use(
