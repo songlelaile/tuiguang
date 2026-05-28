@@ -490,13 +490,21 @@ export async function buildProductView(range = {}) {
   // 按商品ID 聚合 adItem 花费（只 adItem 表的"主体类型=商品"行能 join 到 product 表
   // content 表"主体类型=短视频"，主体ID 是内容ID，无法可靠分摊到单品）
   const adItemSpendByItemId = new Map();
+  const adItemSpendByItemAndDate = new Map();   // P0.1a 行下钻：按商品+日期细分
   // 同时收集主体名称用于补全 product 表里缺失的商品标题
   const adItemNameById = new Map();
   const adItemRowsFiltered = filterRows(adItem, range, "日期", ["主体名称", "计划名字", "场景名字"]);
   for (const row of adItemRowsFiltered) {
     if (row["主体类型"] !== "商品" || !row["主体ID"]) continue;
     const id = String(row["主体ID"]);
-    adItemSpendByItemId.set(id, (adItemSpendByItemId.get(id) || 0) + cleanNumber(row["花费"]));
+    const spend = cleanNumber(row["花费"]);
+    adItemSpendByItemId.set(id, (adItemSpendByItemId.get(id) || 0) + spend);
+    const dateKey = parseDateText(row["日期"]);
+    if (dateKey) {
+      if (!adItemSpendByItemAndDate.has(id)) adItemSpendByItemAndDate.set(id, new Map());
+      const dayMap = adItemSpendByItemAndDate.get(id);
+      dayMap.set(dateKey, (dayMap.get(dateKey) || 0) + spend);
+    }
     if (!adItemNameById.has(id) && row["主体名称"]) {
       adItemNameById.set(id, String(row["主体名称"]));
     }
@@ -519,7 +527,8 @@ export async function buildProductView(range = {}) {
         subjectCode: key,
         "年累计支付金额": 0,
         "平均停留时长_sum": 0,
-        "平均停留时长_count": 0
+        "平均停留时长_count": 0,
+        dailyByDate: new Map()
       }),
       (target) => {
         sumFields(target, row, productFields);
@@ -528,6 +537,16 @@ export async function buildProductView(range = {}) {
         if (stay) {
           target["平均停留时长_sum"] += stay;
           target["平均停留时长_count"] += 1;
+        }
+        // P0.1a 行下钻：按日累加该商品的当日数据
+        const dateKey = parseDateText(row["统计日期"]);
+        if (dateKey) {
+          let day = target.dailyByDate.get(dateKey);
+          if (!day) {
+            day = { date: dateKey };
+            target.dailyByDate.set(dateKey, day);
+          }
+          sumFields(day, row, productFields);
         }
       }
     );
@@ -538,22 +557,50 @@ export async function buildProductView(range = {}) {
     const refund = cleanNumber(row["成功退款金额"]);
     // 推广消耗：用 adItem 表按主体ID 聚合的实际花费，覆盖 product 表自带的空字段
     const itemSpend = adItemSpendByItemId.get(row.itemId) || 0;
-    return enrichProductMetrics({
-      subjectCode: row.subjectCode,
-      "支付金额": pay,
-      "成功退款金额": refund,
-      "支付买家数": row["支付买家数"],
-      "支付老买家数": row["支付老买家数"],
-      "老买家支付金额": row["老买家支付金额"],
-      "商品加购人数": row["商品加购人数"],
-      "商品访客数": row["商品访客数"],
-      "商品浏览量": row["商品浏览量"],
-      "推广消耗": round(itemSpend, 2) || 0,
-      annualPay: round(row["年累计支付金额"], 2),
-      annualPayShare: round(div(row["支付金额"], row["年累计支付金额"]), 4),
-      feeRatio: round(div(itemSpend, pay), 4),
-      avgStay: round(div(row["平均停留时长_sum"], row["平均停留时长_count"]), 2)
-    });
+
+    // P0.1a 行下钻：把 dailyByDate 转成排序后的 daily 数组，注入 adItem 当日花费 + 业务指标
+    // 裁掉全零天（payment=0 且 refund=0 且 spend=0），让长尾商品的 daily 大幅瘦身
+    const itemDailySpendMap = adItemSpendByItemAndDate.get(row.itemId) || new Map();
+    const daily = [...row.dailyByDate.values()]
+      .map((day) => {
+        const dPay = cleanNumber(day["支付金额"]);
+        const dRefund = cleanNumber(day["成功退款金额"]);
+        const dSpend = itemDailySpendMap.get(day.date) || 0;
+        const dNetPay = dPay - dRefund;
+        return {
+          date: day.date,
+          payment: round(dPay, 2),
+          refund: round(dRefund, 2),
+          spend: round(dSpend, 2) || 0,
+          visitors: round(day["商品访客数"], 0),
+          feeRatio: dSpend > 0 && dPay > 0 ? round(div(dSpend, dPay), 4) : null,
+          netFeeRatio: dSpend > 0 && dNetPay !== 0 ? round(div(dSpend, dNetPay), 4) : null,
+          refundRatio: dPay > 0 ? round(div(dRefund, dPay), 4) : null,
+          netRoi: dSpend > 0 ? round(dNetPay / dSpend, 4) : null
+        };
+      })
+      .filter((d) => d.payment > 0 || d.refund > 0 || d.spend > 0)
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    return {
+      ...enrichProductMetrics({
+        subjectCode: row.subjectCode,
+        "支付金额": pay,
+        "成功退款金额": refund,
+        "支付买家数": row["支付买家数"],
+        "支付老买家数": row["支付老买家数"],
+        "老买家支付金额": row["老买家支付金额"],
+        "商品加购人数": row["商品加购人数"],
+        "商品访客数": row["商品访客数"],
+        "商品浏览量": row["商品浏览量"],
+        "推广消耗": round(itemSpend, 2) || 0,
+        annualPay: round(row["年累计支付金额"], 2),
+        annualPayShare: round(div(row["支付金额"], row["年累计支付金额"]), 4),
+        feeRatio: round(div(itemSpend, pay), 4),
+        avgStay: round(div(row["平均停留时长_sum"], row["平均停留时长_count"]), 2)
+      }),
+      daily
+    };
   });
 
   sortBy(table, "pay");

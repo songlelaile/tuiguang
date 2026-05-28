@@ -515,6 +515,64 @@ function sourceModeLabel(value: unknown) {
   return "默认";
 }
 
+function ProductRowDrilldown({ row }: { row: AnyRecord }) {
+  const daily = (row.daily as AnyRecord[]) || [];
+  const dates = daily.map((d) => String(d.date || ""));
+  const payments = daily.map((d) => Number(d.payment) || 0);
+  const refunds = daily.map((d) => Number(d.refund) || 0);
+  const spends = daily.map((d) => Number(d.spend) || 0);
+  const netFeeRatios = daily.map((d) => (typeof d.netFeeRatio === "number" ? d.netFeeRatio : null));
+  const totalPay = payments.reduce((a, b) => a + b, 0);
+  const totalRefund = refunds.reduce((a, b) => a + b, 0);
+  const totalSpend = spends.reduce((a, b) => a + b, 0);
+  const netPay = totalPay - totalRefund;
+
+  const option = {
+    backgroundColor: "transparent",
+    tooltip: {
+      trigger: "axis",
+      backgroundColor: "rgba(20,24,16,0.95)",
+      borderColor: "rgba(245,200,119,0.4)",
+      textStyle: { color: "#f5f0df" },
+      valueFormatter: (value: unknown, _i: unknown, idx: number) => {
+        // ECharts 不提供 series 上下文给 valueFormatter，靠 formatter 自定义比较 verbose；
+        // 直接让金额按 money 显示、费比按 % 显示，混排无所谓——前端拿到结构后做总览
+        return typeof value === "number" ? value.toLocaleString("zh-CN", { maximumFractionDigits: 2 }) : "-";
+      }
+    },
+    legend: { textStyle: { color: "#d9d4c4" }, top: 0 },
+    grid: { left: 64, right: 64, top: 32, bottom: dates.length > 30 ? 56 : 28 },
+    xAxis: { type: "category", data: dates, axisLabel: { color: "#d9d4c4", rotate: dates.length > 14 ? 38 : 0 } },
+    yAxis: [
+      { type: "value", name: "金额", axisLabel: { color: "#d9d4c4", formatter: (v: number) => fmtMoney(v) }, splitLine: { lineStyle: { color: "rgba(255,255,255,0.08)" } } },
+      { type: "value", name: "净费比", axisLabel: { color: "#d9d4c4", formatter: (v: number) => fmtPercent(v) }, splitLine: { show: false }, position: "right" }
+    ],
+    series: [
+      { name: "支付", type: "line", yAxisIndex: 0, smooth: true, symbol: "circle", symbolSize: 5, itemStyle: { color: "#f5c877" }, lineStyle: { color: "#f5c877", width: 2 }, areaStyle: { color: "rgba(245,200,119,0.14)" }, data: payments },
+      { name: "退款", type: "line", yAxisIndex: 0, smooth: true, symbol: "circle", symbolSize: 4, itemStyle: { color: "#e56e60" }, lineStyle: { color: "#e56e60", width: 2 }, data: refunds },
+      { name: "推广花费", type: "line", yAxisIndex: 0, smooth: true, symbol: "circle", symbolSize: 4, itemStyle: { color: "#60c7bc" }, lineStyle: { color: "#60c7bc", width: 2 }, data: spends },
+      { name: "净费比", type: "line", yAxisIndex: 1, smooth: true, symbol: "none", lineStyle: { color: "#d9ee62", width: 2, type: "dashed" }, data: netFeeRatios }
+    ]
+  };
+
+  return (
+    <div className="expandPanel">
+      <div className="expandPanelTitle">
+        <strong>{String(row.subjectCode || "").slice(0, 80)}</strong>
+        <span>分日走势（{daily.length} 天有活跃数据）</span>
+      </div>
+      <div className="expandPanelMeta">
+        <span>区间合计 · 支付 <strong>{fmtMoney(totalPay)}</strong></span>
+        <span>退款 <strong>{fmtMoney(totalRefund)}</strong></span>
+        <span>推广花费 <strong>{fmtMoney(totalSpend)}</strong></span>
+        <span>区间净费比 <strong>{totalSpend > 0 && netPay !== 0 ? fmtPercent(totalSpend / netPay) : "未推广"}</strong></span>
+        <span>区间净ROI <strong>{totalSpend > 0 ? fmtNumber(netPay / totalSpend) : "未推广"}</strong></span>
+      </div>
+      <EChart height={280} option={option} />
+    </div>
+  );
+}
+
 // 商品级"费比 / 链接净ROI"在 spend=0 或 pay=0 时数学上无定义，
 // 用业务语义字样区分，避免把 0% / "-" 误读为"推广高效"或"数据缺失"
 function formatPromoMetric(value: unknown, row: AnyRecord, formatter: (v: unknown) => string) {
@@ -615,7 +673,13 @@ function ProductView({ data }: { data: AnyRecord }) {
           </div>
           <span className="pill">共 {fmtInt(table.length)} 条数据</span>
         </div>
-        <DataTable rows={table} columns={columns} pageSize={15} />
+        <DataTable
+          rows={table}
+          columns={columns}
+          pageSize={15}
+          isExpandable={(row) => Array.isArray(row.daily) && (row.daily as unknown[]).length > 0}
+          renderExpand={(row) => <ProductRowDrilldown row={row} />}
+        />
       </div>
     </section>
   );

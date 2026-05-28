@@ -779,6 +779,89 @@ tbody tr:hover td {
   font-style: italic;
 }
 
+/* DataTable 行展开 */
+.tableWrap th.expandColumn,
+.tableWrap td.expandColumn {
+  width: 36px;
+  text-align: center;
+  padding-left: 4px;
+  padding-right: 4px;
+}
+
+.expandToggle {
+  background: transparent;
+  border: 1px solid rgba(245, 200, 119, 0.32);
+  color: #f5c877;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.16s ease, background-color 0.16s ease;
+}
+
+.expandToggle:hover {
+  background: rgba(245, 200, 119, 0.14);
+}
+
+.expandToggle.open {
+  transform: rotate(90deg);
+  background: rgba(245, 200, 119, 0.22);
+  border-color: rgba(245, 200, 119, 0.6);
+}
+
+.expandPlaceholder {
+  color: rgba(245, 240, 223, 0.18);
+  font-size: 14px;
+}
+
+.tableWrap tr.rowOpen td {
+  background: rgba(245, 200, 119, 0.06);
+}
+
+.tableWrap tr.expandRow > td {
+  padding: 16px 20px 18px;
+  background: rgba(16, 20, 12, 0.55);
+  border-bottom: 1px solid rgba(245, 200, 119, 0.18);
+}
+
+.expandPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.expandPanelTitle {
+  font-size: 13px;
+  color: rgba(245, 240, 223, 0.75);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.expandPanelTitle strong {
+  color: #f5c877;
+  font-size: 14px;
+}
+
+.expandPanelMeta {
+  font-size: 11px;
+  color: rgba(245, 240, 223, 0.5);
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.expandPanelMeta span strong {
+  color: #f5f0df;
+  margin-left: 4px;
+}
+
 @media (max-width: 960px) {
   .timelineRow {
     grid-template-columns: 80px 1fr;
