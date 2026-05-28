@@ -681,6 +681,44 @@ function adUnion(raw) {
   return [...raw.adItem, ...raw.content];
 }
 
+// P0.1b 行下钻：把 group target 上累计的 dailyByDate Map 转成可被前端消费的 daily 数组
+// （丢掉 spend=0 && gmv=0 的天数，避免长尾对象塞一堆零值天）
+function flushAdDailyByDate(target) {
+  const days = [...(target.dailyByDate?.values() || [])];
+  delete target.dailyByDate;
+  return days
+    .map((day) => {
+      enrichAdMetrics(day);
+      return {
+        date: day.date,
+        spend: cleanNumber(day.spend) || 0,
+        gmv: cleanNumber(day.gmv) || 0,
+        roi: day.roi,
+        cpc: day.cpc,
+        ctr: day.ctr,
+        cvr: day.cvr,
+        impressions: cleanNumber(day["展现量"]),
+        clicks: cleanNumber(day["点击量"]),
+        orders: cleanNumber(day["总成交笔数"])
+      };
+    })
+    .filter((d) => d.spend > 0 || d.gmv > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+// 在 group merge 阶段，把当前 row 累加到 target.dailyByDate 对应的日子
+function accumulateAdDailyRow(target, row, dateField = "日期") {
+  if (!target.dailyByDate) target.dailyByDate = new Map();
+  const dateKey = parseDateText(row[dateField]);
+  if (!dateKey) return;
+  let day = target.dailyByDate.get(dateKey);
+  if (!day) {
+    day = { date: dateKey };
+    target.dailyByDate.set(dateKey, day);
+  }
+  sumFields(day, row, adFields);
+}
+
 function buildAdSubject(rows) {
   const groups = new Map();
   for (const row of rows) {
@@ -728,9 +766,17 @@ export async function buildAdProductsView(range = {}) {
   const planGroups = new Map();
   for (const row of rows) {
     const key = `${row["计划名字"] || "未识别计划"}${row["主体名称"] || "未识别主体"}`;
-    addToGroup(planGroups, key, () => ({ planCode: key }), (target) => sumFields(target, row, adFields));
+    addToGroup(planGroups, key, () => ({ planCode: key }), (target) => {
+      sumFields(target, row, adFields);
+      accumulateAdDailyRow(target, row);
+    });
   }
-  const planTable = [...planGroups.values()].map(enrichAdMetrics);
+  const planTable = [...planGroups.values()].map((row) => {
+    const daily = flushAdDailyByDate(row);
+    enrichAdMetrics(row);
+    row.daily = daily;
+    return row;
+  });
   sortBy(planTable, "spend");
 
   const totalSpend = subjects.reduce((sum, row) => sum + cleanNumber(row.spend), 0);
@@ -768,6 +814,7 @@ export async function buildKeywordView(range = {}) {
     addToGroup(groups, keywordCode, () => ({ keywordCode, type: row["词类型"], word: row["词名字/词包名字"] }), (target) => {
       sumFields(target, row, [...adFields, "平均展现排名"]);
       target.rankWeighted = cleanNumber(target.rankWeighted) + cleanNumber(row["平均展现排名"]) * cleanNumber(row["展现量"]);
+      accumulateAdDailyRow(target, row);
     });
     const word = row["词名字/词包名字"] || "未命名";
     addToGroup(wordGroups, word, () => ({ name: word, value: 0 }), (target) => {
@@ -780,8 +827,10 @@ export async function buildKeywordView(range = {}) {
   }
 
   const table = [...groups.values()].map((row) => {
+    const daily = flushAdDailyByDate(row);
     enrichAdMetrics(row);
     row.avgRank = round(div(row.rankWeighted, row["展现量"]), 4);
+    row.daily = daily;
     return row;
   });
   sortBy(table, "spend");
@@ -821,7 +870,10 @@ export async function buildCrowdView(range = {}) {
 
   for (const row of rows) {
     const crowdCode = `${row["人群名字"] || "未识别人群"}${row["场景名字"] || ""}${row["单元名字"] || ""}`;
-    addToGroup(groups, crowdCode, () => ({ crowdCode }), (target) => sumFields(target, row, adFields));
+    addToGroup(groups, crowdCode, () => ({ crowdCode }), (target) => {
+      sumFields(target, row, adFields);
+      accumulateAdDailyRow(target, row);
+    });
     const scene = row["场景名字"] || "未识别场景";
     addToGroup(sceneWords, scene, () => ({ name: scene, value: 0 }), (target) => {
       target.value += cleanNumber(row["花费"]);
@@ -832,7 +884,12 @@ export async function buildCrowdView(range = {}) {
     });
   }
 
-  const table = [...groups.values()].map(enrichAdMetrics).filter((row) => cleanNumber(row.spend) > 0);
+  const table = [...groups.values()].map((row) => {
+    const daily = flushAdDailyByDate(row);
+    enrichAdMetrics(row);
+    row.daily = daily;
+    return row;
+  }).filter((row) => cleanNumber(row.spend) > 0);
   sortBy(table, "spend");
 
   const dayGroups = new Map();
@@ -862,9 +919,17 @@ export async function buildContentView(range = {}) {
   const groups = new Map();
   for (const row of rows) {
     const contentCode = `${row["主体类型"] || "内容"}${row["主体名称"] || "未命名内容"}`;
-    addToGroup(groups, contentCode, () => ({ contentCode, type: row["主体类型"] || "内容" }), (target) => sumFields(target, row, adFields));
+    addToGroup(groups, contentCode, () => ({ contentCode, type: row["主体类型"] || "内容" }), (target) => {
+      sumFields(target, row, adFields);
+      accumulateAdDailyRow(target, row);
+    });
   }
-  const table = [...groups.values()].map(enrichAdMetrics);
+  const table = [...groups.values()].map((row) => {
+    const daily = flushAdDailyByDate(row);
+    enrichAdMetrics(row);
+    row.daily = daily;
+    return row;
+  });
   sortBy(table, "spend");
 
   const dayGroups = new Map();

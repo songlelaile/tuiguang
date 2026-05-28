@@ -573,6 +573,73 @@ function ProductRowDrilldown({ row }: { row: AnyRecord }) {
   );
 }
 
+function AdRowDrilldown({ row }: { row: AnyRecord }) {
+  const daily = (row.daily as AnyRecord[]) || [];
+  const title = String(row.planCode || row.keywordCode || row.crowdCode || row.contentCode || row.subjectCode || row.word || "");
+  const dates = daily.map((d) => String(d.date || ""));
+  const spends = daily.map((d) => Number(d.spend) || 0);
+  const gmvs = daily.map((d) => Number(d.gmv) || 0);
+  const rois = daily.map((d) => (typeof d.roi === "number" ? d.roi : null));
+  const ctrs = daily.map((d) => (typeof d.ctr === "number" ? d.ctr : null));
+  const cvrs = daily.map((d) => (typeof d.cvr === "number" ? d.cvr : null));
+  const totalSpend = spends.reduce((a, b) => a + b, 0);
+  const totalGmv = gmvs.reduce((a, b) => a + b, 0);
+  const totalClicks = daily.reduce((a, d) => a + (Number(d.clicks) || 0), 0);
+  const totalOrders = daily.reduce((a, d) => a + (Number(d.orders) || 0), 0);
+
+  const option = {
+    backgroundColor: "transparent",
+    tooltip: {
+      trigger: "axis",
+      backgroundColor: "rgba(20,24,16,0.95)",
+      borderColor: "rgba(245,200,119,0.4)",
+      textStyle: { color: "#f5f0df" },
+      formatter: (params: unknown) => {
+        const arr = Array.isArray(params) ? params : [params];
+        const idx = (arr[0] as { dataIndex: number }).dataIndex;
+        const d = daily[idx] || {};
+        const lines = arr.map((p: any) => `<div>${p.marker} ${p.seriesName}: <strong>${typeof p.value === "number" ? (p.seriesName === "ROI" ? fmtNumber(p.value) : fmtMoney(p.value)) : "-"}</strong></div>`);
+        const extra = `
+          <div style="margin-top:6px; padding-top:6px; border-top:1px dashed rgba(245,200,119,0.3); color:rgba(245,240,223,0.78); font-size:11px">
+            CTR ${typeof d.ctr === "number" ? fmtPercent(d.ctr) : "-"}　·　CVR ${typeof d.cvr === "number" ? fmtPercent(d.cvr) : "-"}　·　点击 ${fmtInt(d.clicks)}　·　订单 ${fmtInt(d.orders)}
+          </div>`;
+        return `<div><strong>${(arr[0] as { axisValue: string }).axisValue}</strong>${lines.join("")}${extra}</div>`;
+      }
+    },
+    legend: { textStyle: { color: "#d9d4c4" }, top: 0 },
+    grid: { left: 64, right: 64, top: 32, bottom: dates.length > 30 ? 56 : 28 },
+    xAxis: { type: "category", data: dates, axisLabel: { color: "#d9d4c4", rotate: dates.length > 14 ? 38 : 0 } },
+    yAxis: [
+      { type: "value", name: "金额", axisLabel: { color: "#d9d4c4", formatter: (v: number) => fmtMoney(v) }, splitLine: { lineStyle: { color: "rgba(255,255,255,0.08)" } } },
+      { type: "value", name: "ROI", axisLabel: { color: "#d9d4c4", formatter: (v: number) => fmtNumber(v) }, splitLine: { show: false }, position: "right" }
+    ],
+    series: [
+      { name: "花费", type: "line", yAxisIndex: 0, smooth: true, symbol: "circle", symbolSize: 5, itemStyle: { color: "#60c7bc" }, lineStyle: { color: "#60c7bc", width: 2 }, areaStyle: { color: "rgba(96,199,188,0.12)" }, data: spends },
+      { name: "GMV", type: "line", yAxisIndex: 0, smooth: true, symbol: "circle", symbolSize: 4, itemStyle: { color: "#f5c877" }, lineStyle: { color: "#f5c877", width: 2 }, data: gmvs },
+      { name: "ROI", type: "line", yAxisIndex: 1, smooth: true, symbol: "none", lineStyle: { color: "#d9ee62", width: 2, type: "dashed" }, data: rois }
+    ]
+  };
+  void ctrs;
+  void cvrs;
+
+  return (
+    <div className="expandPanel">
+      <div className="expandPanelTitle">
+        <strong>{title.slice(0, 80)}</strong>
+        <span>分日走势（{daily.length} 天有活跃数据）</span>
+      </div>
+      <div className="expandPanelMeta">
+        <span>区间花费 <strong>{fmtMoney(totalSpend)}</strong></span>
+        <span>GMV <strong>{fmtMoney(totalGmv)}</strong></span>
+        <span>ROI <strong>{totalSpend > 0 ? fmtNumber(totalGmv / totalSpend) : "—"}</strong></span>
+        <span>点击 <strong>{fmtInt(totalClicks)}</strong></span>
+        <span>订单 <strong>{fmtInt(totalOrders)}</strong></span>
+      </div>
+      <EChart height={280} option={option} />
+    </div>
+  );
+}
+
 // 商品级"费比 / 链接净ROI"在 spend=0 或 pay=0 时数学上无定义，
 // 用业务语义字样区分，避免把 0% / "-" 误读为"推广高效"或"数据缺失"
 function formatPromoMetric(value: unknown, row: AnyRecord, formatter: (v: unknown) => string) {
@@ -790,7 +857,13 @@ function AdProductsView({ data }: { data: AnyRecord }) {
           </div>
           <span className="pill">共 {fmtInt(planTable.length)} 条数据</span>
         </div>
-        <DataTable rows={planTable} columns={columns} pageSize={18} />
+        <DataTable
+          rows={planTable}
+          columns={columns}
+          pageSize={18}
+          isExpandable={(row) => Array.isArray(row.daily) && (row.daily as unknown[]).length > 0}
+          renderExpand={(row) => <AdRowDrilldown row={row} />}
+        />
       </div>
     </section>
   );
@@ -854,7 +927,13 @@ function KeywordView({ data }: { data: AnyRecord }) {
           </div>
           <span className="pill">共 {fmtInt(table.length)} 条数据</span>
         </div>
-        <DataTable rows={table} columns={columns} pageSize={18} />
+        <DataTable
+          rows={table}
+          columns={columns}
+          pageSize={18}
+          isExpandable={(row) => Array.isArray(row.daily) && (row.daily as unknown[]).length > 0}
+          renderExpand={(row) => <AdRowDrilldown row={row} />}
+        />
       </div>
     </section>
   );
@@ -914,7 +993,13 @@ function CrowdView({ data }: { data: AnyRecord }) {
           </div>
           <span className="pill">共 {fmtInt(table.length)} 条数据</span>
         </div>
-        <DataTable rows={table} columns={columns} pageSize={18} />
+        <DataTable
+          rows={table}
+          columns={columns}
+          pageSize={18}
+          isExpandable={(row) => Array.isArray(row.daily) && (row.daily as unknown[]).length > 0}
+          renderExpand={(row) => <AdRowDrilldown row={row} />}
+        />
       </div>
     </section>
   );
@@ -971,7 +1056,13 @@ function ContentView({ data }: { data: AnyRecord }) {
           <h2>内容明细</h2>
           <span className="pill">共 {fmtInt(table.length)} 条数据</span>
         </div>
-        <DataTable rows={table} columns={columns} pageSize={18} />
+        <DataTable
+          rows={table}
+          columns={columns}
+          pageSize={18}
+          isExpandable={(row) => Array.isArray(row.daily) && (row.daily as unknown[]).length > 0}
+          renderExpand={(row) => <AdRowDrilldown row={row} />}
+        />
       </div>
     </section>
   );
