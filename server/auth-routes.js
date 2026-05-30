@@ -25,6 +25,7 @@ import {
 } from "./auth.js";
 import { issueCaptcha, verifyCaptcha } from "./captcha.js";
 import { activeProvider, sendSms } from "./sms.js";
+import { loginLimiter, registerLimiter, smsSendLimiter } from "./rate-limits.js";
 
 // 功能开关:env "false" 关闭,缺省/其它值为开
 // AUTH_OPEN_REGISTRATION=false → 必须邀请码才能注册
@@ -58,7 +59,7 @@ export function createAuthRouter(getDb) {
     res.json(issueCaptcha());
   });
 
-  router.post("/register", async (req, res, next) => {
+  router.post("/register", registerLimiter, async (req, res, next) => {
     try {
       const db = getDb();
       const { username, password, email, invite_code, captcha_id, captcha_answer } = req.body || {};
@@ -118,7 +119,7 @@ export function createAuthRouter(getDb) {
     } catch (e) { next(e); }
   });
 
-  router.post("/login", async (req, res, next) => {
+  router.post("/login", loginLimiter, async (req, res, next) => {
     try {
       const db = getDb();
       const { username, password } = req.body || {};
@@ -151,7 +152,7 @@ export function createAuthRouter(getDb) {
 
   // ---- P4.1 手机号 + SMS 登录 ----
 
-  router.post("/sms/send", async (req, res, next) => {
+  router.post("/sms/send", smsSendLimiter, async (req, res, next) => {
     if (!isSmsLoginEnabled()) return res.status(404).json({ error: "短信登录暂未启用" });
     const db = getDb();
     const { phone } = req.body || {};

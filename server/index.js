@@ -50,6 +50,10 @@ import { createAdminRouter } from "./admin-routes.js";
 const app = express();
 const port = Number(process.env.PORT || 5174);
 const host = process.env.HOST || "0.0.0.0";
+
+// P4.5 rate-limit 要看真实 IP;我们容器前面有 nginx 反代 1 层
+// 信任 1 层代理就够,设 true 会把所有 X-Forwarded-For 信任(不安全)
+app.set("trust proxy", 1);
 const uploadMaxMb = Number(process.env.UPLOAD_MAX_MB || 100);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
@@ -553,13 +557,27 @@ try {
   console.error("[migration] 上传文件迁移失败(已忽略):", e.message);
 }
 
-// 清理过期 session
+// 启动时清一次
 try {
   const removed = pruneExpiredSessions(getDb());
   if (removed > 0) console.log(`[auth] 启动时清理 ${removed} 条过期 session`);
 } catch (e) {
   console.error("[auth] session 清理失败:", e.message);
 }
+
+// P4.5 sessions 表长期会无限增长,定时清过期(默认 1 小时一次)
+const SESSION_PRUNE_INTERVAL_MS = Number(process.env.SESSION_PRUNE_INTERVAL_MS || 60 * 60 * 1000);
+const sessionPruneTimer = setInterval(() => {
+  try {
+    const removed = pruneExpiredSessions(getDb());
+    if (removed > 0) console.log(`[auth] 定时清理 ${removed} 条过期 session`);
+  } catch (e) {
+    console.error("[auth] 定时 session 清理失败:", e.message);
+  }
+}, SESSION_PRUNE_INTERVAL_MS);
+sessionPruneTimer.unref(); // 不阻塞进程退出
+process.on("SIGTERM", () => clearInterval(sessionPruneTimer));
+process.on("SIGINT", () => clearInterval(sessionPruneTimer));
 
 app.listen(port, host, () => {
   console.log(`huopan-bi-api listening on http://${host}:${port}`);
