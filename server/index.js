@@ -54,7 +54,7 @@ const host = process.env.HOST || "0.0.0.0";
 // P4.5 rate-limit 要看真实 IP;我们容器前面有 nginx 反代 1 层
 // 信任 1 层代理就够,设 true 会把所有 X-Forwarded-For 信任(不安全)
 app.set("trust proxy", 1);
-const uploadMaxMb = Number(process.env.UPLOAD_MAX_MB || 100);
+const uploadMaxMb = Number(process.env.UPLOAD_MAX_MB || 500);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, "..");
 
