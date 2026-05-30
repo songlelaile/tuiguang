@@ -15,12 +15,11 @@ import { LoginView, RegisterView } from "./auth/AuthPages";
 import { logout, useAuth } from "./auth/useAuth";
 import type { AuthState } from "./auth/shared";
 import type { Meta } from "./types/sources";
+import { LazyBoundary, lazyWithRetry } from "./components/LazyBoundary";
 
-const AdminView = React.lazy(() => import("./auth/AdminView"));
-
-// P4.7 Sources 页(上传 / 时间线 / 历史归档)也走 lazy,单独 chunk
-// 不点"源数据"导航就不下载;首次点击时显示 Suspense fallback
-const SourcesView = React.lazy(() => import("./views/Sources"));
+// P4.6/4.7 lazy chunk;P4.8 包了 retry + ErrorBoundary,网络抖动时自动重试 2 次再兜底
+const AdminView = lazyWithRetry(() => import("./auth/AdminView"));
+const SourcesView = lazyWithRetry(() => import("./views/Sources"));
 
 type ViewKey = "product" | "ad-products" | "keywords" | "crowds" | "contents" | "sources" | "admin";
 
@@ -530,14 +529,14 @@ function App({ auth }: { auth: AuthState }) {
         {loading && <div className="stateLine">正在按当前筛选重算指标...</div>}
         {error && <div className="stateLine error">数据服务异常：{error}</div>}
         {!error && active === "sources" && (
-          <React.Suspense fallback={<div className="stateLine">加载源数据页...</div>}>
+          <LazyBoundary fallback={<div className="stateLine">加载源数据页...</div>}>
             <SourcesView meta={meta} onMetaChange={setMeta} />
-          </React.Suspense>
+          </LazyBoundary>
         )}
         {!error && active === "admin" && auth.user?.role === "admin" && (
-          <React.Suspense fallback={<div className="stateLine">加载管理后台...</div>}>
+          <LazyBoundary fallback={<div className="stateLine">加载管理后台...</div>}>
             <AdminView />
-          </React.Suspense>
+          </LazyBoundary>
         )}
         {!error && active === "product" && data && <ProductView data={data} />}
         {!error && active === "ad-products" && data && <AdProductsView data={data} />}

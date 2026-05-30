@@ -158,25 +158,30 @@ type CoverageInfo = {
   crowd_date_min: string | null; crowd_date_max: string | null;
 };
 
-function HistoryArchivePanel() {
+// P4.8 接受一个 `refreshSignal` 任意值;父级在上传 / 清空后传新值过来,
+// useEffect 检测到 prop 变化 → 重新拉 coverage,避免显示陈旧的 uploads 计数
+function HistoryArchivePanel({ refreshSignal }: { refreshSignal?: unknown }) {
   const [coverage, setCoverage] = React.useState<CoverageInfo | null>(null);
   const [error, setError] = React.useState("");
   const [exportStart, setExportStart] = React.useState("");
   const [exportEnd, setExportEnd] = React.useState("");
+  const userTouchedDates = React.useRef(false);
 
   React.useEffect(() => {
     fetch("/api/history/coverage")
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((data) => {
         setCoverage(data);
-        // 默认填入库覆盖范围
-        const start = data.product_date_min || data.ad_item_date_min || "";
-        const end = data.product_date_max || data.ad_item_date_max || "";
-        setExportStart(start || "");
-        setExportEnd(end || "");
+        // 用户没手动调过日期前,默认填库覆盖范围;之后保留用户的选择
+        if (!userTouchedDates.current) {
+          const start = data.product_date_min || data.ad_item_date_min || "";
+          const end = data.product_date_max || data.ad_item_date_max || "";
+          setExportStart(start || "");
+          setExportEnd(end || "");
+        }
       })
       .catch((err) => setError(err instanceof Error ? err.message : "加载失败"));
-  }, []);
+  }, [refreshSignal]);
 
   const coverageStart = coverage
     ? [coverage.product_date_min, coverage.ad_item_date_min, coverage.content_date_min, coverage.keyword_date_min, coverage.crowd_date_min].filter(Boolean).sort()[0] || ""
@@ -222,11 +227,23 @@ function HistoryArchivePanel() {
           <div className="historyExportRow">
             <label>
               <span>开始日期</span>
-              <input type="date" value={exportStart} onChange={(e) => setExportStart(e.target.value)} min={coverageStart} max={coverageEnd} />
+              <input
+                type="date"
+                value={exportStart}
+                onChange={(e) => { userTouchedDates.current = true; setExportStart(e.target.value); }}
+                min={coverageStart}
+                max={coverageEnd}
+              />
             </label>
             <label>
               <span>结束日期</span>
-              <input type="date" value={exportEnd} onChange={(e) => setExportEnd(e.target.value)} min={coverageStart} max={coverageEnd} />
+              <input
+                type="date"
+                value={exportEnd}
+                onChange={(e) => { userTouchedDates.current = true; setExportEnd(e.target.value); }}
+                min={coverageStart}
+                max={coverageEnd}
+              />
             </label>
             <a className="exportButton" href={exportUrl} download title="下载该时段对齐的 5 张表 zip（生参原始 csv 格式）">
               下载 ZIP（5 张对齐 csv）
@@ -357,7 +374,8 @@ export default function SourcesView({ meta, onMetaChange }: { meta: Meta | null;
         <AlignmentTimeline alignment={meta?.alignment} />
         <DataTable rows={meta?.sources || []} columns={columns} pageSize={20} />
       </div>
-      <HistoryArchivePanel />
+      {/* P4.8 上传成功后 meta 引用会刷新,HistoryArchivePanel 借此重拉 coverage */}
+      <HistoryArchivePanel refreshSignal={meta} />
     </section>
   );
 }

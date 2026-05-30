@@ -16,6 +16,28 @@ export default function AdminView() {
   const [note, setNote] = React.useState("");
   const [maxUses, setMaxUses] = React.useState(1);
 
+  // P4.8 复制按钮的瞬态反馈:同一时刻只有一个 code 处于"刚被复制"或"复制失败"状态
+  const [copyState, setCopyState] = React.useState<{ code: string; ok: boolean } | null>(null);
+
+  async function handleCopyLink(code: string) {
+    const url = `${window.location.origin}/#/register?invite=${encodeURIComponent(code)}`;
+    if (!navigator.clipboard) {
+      setCopyState({ code, ok: false });
+      setErr("当前浏览器不支持剪贴板 API,链接是:" + url);
+      setTimeout(() => setCopyState(null), 2200);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopyState({ code, ok: true });
+      setTimeout(() => setCopyState(null), 1500);
+    } catch (e: unknown) {
+      setCopyState({ code, ok: false });
+      setErr(e instanceof Error ? `复制失败:${e.message}` : "复制失败");
+      setTimeout(() => setCopyState(null), 2200);
+    }
+  }
+
   const reload = React.useCallback(async () => {
     setLoading(true);
     setErr("");
@@ -93,9 +115,6 @@ export default function AdminView() {
       setErr(e instanceof Error ? e.message : "操作失败");
     }
   }
-
-  const registerUrlFor = (code: string) =>
-    `${window.location.origin}/#/register?invite=${encodeURIComponent(code)}`;
 
   const tabBtn = (active: boolean): React.CSSProperties => ({
     padding: "8px 14px",
@@ -200,18 +219,25 @@ export default function AdminView() {
                   <td style={{ ...td, fontFamily: "monospace", color: "#f5c877" }}>{inv.code}</td>
                   <td style={td}>
                     <button
-                      onClick={() => navigator.clipboard?.writeText(registerUrlFor(inv.code))}
+                      onClick={() => handleCopyLink(inv.code)}
                       style={{
-                        border: "1px solid rgba(245, 200, 119, 0.3)",
+                        border: copyState?.code === inv.code && !copyState.ok
+                          ? "1px solid rgba(229, 80, 80, 0.4)"
+                          : "1px solid rgba(245, 200, 119, 0.3)",
                         background: "transparent",
-                        color: "#f5c877",
+                        color: copyState?.code === inv.code
+                          ? (copyState.ok ? "#a8d8a8" : "#ffb3b3")
+                          : "#f5c877",
                         padding: "4px 8px",
                         borderRadius: 4,
                         cursor: "pointer",
-                        fontSize: 12
+                        fontSize: 12,
+                        whiteSpace: "nowrap"
                       }}
                     >
-                      复制注册链接
+                      {copyState?.code === inv.code
+                        ? (copyState.ok ? "✓ 已复制" : "✗ 复制失败")
+                        : "复制注册链接"}
                     </button>
                   </td>
                   <td style={td}>
