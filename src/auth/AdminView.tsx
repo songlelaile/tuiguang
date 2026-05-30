@@ -6,6 +6,7 @@
 import React from "react";
 import { authBtn, authError, authInput, authLabel } from "./shared";
 import type { AdminUser, Invite } from "./shared";
+import { readApiError } from "../lib/api";
 
 export default function AdminView() {
   const [tab, setTab] = React.useState<"invites" | "users">("invites");
@@ -73,8 +74,7 @@ export default function AdminView() {
         credentials: "include",
         body: JSON.stringify({ max_uses: maxUses, note: note || undefined })
       });
-      if (!res.ok)
-        throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
+      if (!res.ok) throw new Error(await readApiError(res));
       setNote("");
       setMaxUses(1);
       await reload();
@@ -91,8 +91,7 @@ export default function AdminView() {
         method: "DELETE",
         credentials: "include"
       });
-      if (!res.ok)
-        throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
+      if (!res.ok) throw new Error(await readApiError(res));
       await reload();
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : "操作失败");
@@ -108,8 +107,7 @@ export default function AdminView() {
         credentials: "include",
         body: JSON.stringify({ status })
       });
-      if (!res.ok)
-        throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
+      if (!res.ok) throw new Error(await readApiError(res));
       await reload();
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : "操作失败");

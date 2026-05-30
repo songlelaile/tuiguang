@@ -43,7 +43,12 @@ export function useAuth(): AuthState {
       });
   }, [refresh]);
 
-  return { user, loading, features, refresh };
+  // P4.9 memo 返回对象,避免每次父级渲染都产生新的 auth 引用
+  // 任何下游 React.memo 比较 auth identity 才能稳定
+  return React.useMemo(
+    () => ({ user, loading, features, refresh }),
+    [user, loading, features, refresh]
+  );
 }
 
 // 登出:打 logout 接口 + 刷新 auth + 跳回登录页

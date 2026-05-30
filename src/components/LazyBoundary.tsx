@@ -36,6 +36,21 @@ type LazyBoundaryProps = {
   errorFallback?: (error: Error) => React.ReactNode;
 };
 
+// P4.9 小语法糖:LazyView when={cond} fallback="..." 替代手写 Suspense+条件
+// 减少 main.tsx 里 4 行重复 boilerplate × N 个 lazy view
+export function LazyView({
+  when,
+  fallback,
+  children
+}: {
+  when: boolean;
+  fallback: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  if (!when) return null;
+  return <LazyBoundary fallback={fallback}>{children}</LazyBoundary>;
+}
+
 type LazyBoundaryState = { error: Error | null };
 
 export class LazyBoundary extends React.Component<LazyBoundaryProps, LazyBoundaryState> {

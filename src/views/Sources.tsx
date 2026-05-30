@@ -9,6 +9,7 @@ import React from "react";
 import { DataTable, type ColumnDef } from "../ui/DataTable";
 import { fmtInt } from "../utils/format";
 import type { Alignment, AlignmentStatus, Meta, MetaSource } from "../types/sources";
+import { readApiError } from "../lib/api";
 
 // 5 张源表槽位
 const sourceUploadSlots = [
@@ -276,11 +277,6 @@ export default function SourcesView({ meta, onMetaChange }: { meta: Meta | null;
     { key: "file", label: "文件路径", width: "460px" }
   ];
 
-  async function readApiMessage(response: Response) {
-    const payload = await response.json().catch(() => null);
-    return payload?.error || response.statusText;
-  }
-
   async function uploadSources() {
     if (!selectedCount) return;
     const formData = new FormData();
@@ -292,7 +288,7 @@ export default function SourcesView({ meta, onMetaChange }: { meta: Meta | null;
     setMessage("");
     try {
       const response = await fetch("/api/uploads/sources", { method: "POST", body: formData });
-      if (!response.ok) throw new Error(await readApiMessage(response));
+      if (!response.ok) throw new Error(await readApiError(response));
       const payload = await response.json();
       onMetaChange(payload.meta);
       setFiles({});
@@ -310,7 +306,7 @@ export default function SourcesView({ meta, onMetaChange }: { meta: Meta | null;
     setMessage("");
     try {
       const response = await fetch("/api/uploads/sources", { method: "DELETE" });
-      if (!response.ok) throw new Error(await readApiMessage(response));
+      if (!response.ok) throw new Error(await readApiError(response));
       const payload = await response.json();
       onMetaChange(payload.meta);
       setFiles({});

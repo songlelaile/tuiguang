@@ -15,11 +15,17 @@ import { LoginView, RegisterView } from "./auth/AuthPages";
 import { logout, useAuth } from "./auth/useAuth";
 import type { AuthState } from "./auth/shared";
 import type { Meta } from "./types/sources";
-import { LazyBoundary, lazyWithRetry } from "./components/LazyBoundary";
+import { LazyView, lazyWithRetry } from "./components/LazyBoundary";
 
-// P4.6/4.7 lazy chunk;P4.8 包了 retry + ErrorBoundary,网络抖动时自动重试 2 次再兜底
+// P4.6/4.7 lazy chunk;P4.8 加 retry + ErrorBoundary;P4.9 加 nav hover 时的 prefetch
 const AdminView = lazyWithRetry(() => import("./auth/AdminView"));
 const SourcesView = lazyWithRetry(() => import("./views/Sources"));
+
+// nav 鼠标 hover 就开始下载,等用户真正点击时 chunk 已经在浏览器 cache 里
+const prefetchers: Partial<Record<string, () => void>> = {
+  admin: () => { import("./auth/AdminView"); },
+  sources: () => { import("./views/Sources"); }
+};
 
 type ViewKey = "product" | "ad-products" | "keywords" | "crowds" | "contents" | "sources" | "admin";
 
@@ -450,7 +456,13 @@ function App({ auth }: { auth: AuthState }) {
             .map((item) => {
               const Icon = item.icon;
               return (
-                <button key={item.key} className={active === item.key ? "navItem active" : "navItem"} onClick={() => activateView(item.key)}>
+                <button
+                  key={item.key}
+                  className={active === item.key ? "navItem active" : "navItem"}
+                  onClick={() => activateView(item.key)}
+                  onMouseEnter={prefetchers[item.key]}
+                  onFocus={prefetchers[item.key]}
+                >
                   <Icon size={18} />
                   <span>{item.label}</span>
                 </button>
@@ -528,16 +540,15 @@ function App({ auth }: { auth: AuthState }) {
 
         {loading && <div className="stateLine">正在按当前筛选重算指标...</div>}
         {error && <div className="stateLine error">数据服务异常：{error}</div>}
-        {!error && active === "sources" && (
-          <LazyBoundary fallback={<div className="stateLine">加载源数据页...</div>}>
-            <SourcesView meta={meta} onMetaChange={setMeta} />
-          </LazyBoundary>
-        )}
-        {!error && active === "admin" && auth.user?.role === "admin" && (
-          <LazyBoundary fallback={<div className="stateLine">加载管理后台...</div>}>
-            <AdminView />
-          </LazyBoundary>
-        )}
+        <LazyView when={!error && active === "sources"} fallback={<div className="stateLine">加载源数据页...</div>}>
+          <SourcesView meta={meta} onMetaChange={setMeta} />
+        </LazyView>
+        <LazyView
+          when={!error && active === "admin" && auth.user?.role === "admin"}
+          fallback={<div className="stateLine">加载管理后台...</div>}
+        >
+          <AdminView />
+        </LazyView>
         {!error && active === "product" && data && <ProductView data={data} />}
         {!error && active === "ad-products" && data && <AdProductsView data={data} />}
         {!error && active === "keywords" && data && <KeywordView data={data} />}
