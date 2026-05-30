@@ -83,7 +83,7 @@ nano .env       # 修改 UPLOADS_HOST_DIR、APP_BIND_PORT 等
 APP_BIND_PORT=5180
 UPLOADS_HOST_DIR=/var/lib/tuiguang/uploads
 DATA_HOST_DIR=/var/lib/tuiguang/data
-UPLOAD_MAX_MB=100
+UPLOAD_MAX_MB=500
 TZ=Asia/Shanghai
 
 # 首次部署:引导首个管理员账号(只在 users 表为空时生效;创建完后建议清掉密码)
@@ -237,7 +237,7 @@ docker compose up -d --build
 | `[startup] DB 初始化失败` "检测到旧版业务数据" | 升级老库时 `ADMIN_BOOTSTRAP_USERNAME/PASSWORD` 没设;设了 env 后 `docker compose up -d` 重启即可 |
 | 管理员账号不存在,登录页提示密码错 | `docker compose logs app \| grep '\[auth\]'`;若看到 "users 表为空" 警告,补 env 后重启 |
 | 登录后立刻又跳回登录页 | cookie 没设进来;检查 nginx 是不是吃掉了 Set-Cookie(本配置不会),浏览器是否禁用了第三方 cookie(同源不该有这问题) |
-| 上传 413 Request Entity Too Large | 主 nginx `client_max_body_size` 没到 100M |
+| 上传 413 Request Entity Too Large | 主 nginx `client_max_body_size` 没到 500M(或没跟 `.env` 的 `UPLOAD_MAX_MB` 对齐) |
 | 上传卡死 → 504 | 主 nginx `proxy_read_timeout` 不够大 |
 | certbot 拒绝签发 | DNS 没生效（dig 看）或 80 端口没通到主 nginx（`sudo ss -ltnp \| grep :80`） |
 | 时间线总是 incomplete | 5 个槽位还没上齐，或 csv 编码不是 GB18030 |

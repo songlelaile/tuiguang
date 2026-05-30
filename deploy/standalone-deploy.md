@@ -43,7 +43,7 @@ nano .env
 APP_PORT=80
 UPLOADS_HOST_DIR=/var/lib/tuiguang/uploads
 DATA_HOST_DIR=/var/lib/tuiguang/data
-UPLOAD_MAX_MB=100
+UPLOAD_MAX_MB=500
 TZ=Asia/Shanghai
 
 # 首次部署:引导首个管理员账号(只在 users 表为空时生效;创建后建议清掉密码)

@@ -534,6 +534,12 @@ app.use((req, res, next) => {
 
 app.use((error, _req, res, _next) => {
   console.error(error);
+  // P4.10 把 multer "File too large" 翻译成中文 + 告诉用户上限
+  if (error?.code === "LIMIT_FILE_SIZE") {
+    return res.status(413).json({
+      error: `单个文件不能超过 ${uploadMaxMb} MB。如需上传更大的文件,请联系管理员调高 UPLOAD_MAX_MB 环境变量(同步调高 nginx 的 client_max_body_size)。`
+    });
+  }
   res.status(500).json({
     error: error instanceof Error ? error.message : "Unknown server error"
   });
