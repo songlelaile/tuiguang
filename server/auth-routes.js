@@ -12,6 +12,7 @@ import {
   generateSmsCode,
   getUserByPhone,
   getUserByUsername,
+  hashPasswordAsync,
   recordSmsCode,
   redeemInvite,
   setSessionCookie,
@@ -39,7 +40,9 @@ export function createAuthRouter(getDb) {
   const router = express.Router();
 
   // GET /api/auth/features — 前端用此决定哪些 UI 显示;无需登录
+  // P4.3:这接口几乎不变(只看 env),给 5 分钟 browser cache,避免每次首屏都跑一遍
   router.get("/features", (_req, res) => {
+    res.set("Cache-Control", "public, max-age=300, must-revalidate");
     res.json({
       open_registration: isOpenRegistrationEnabled(),
       sms_login: isSmsLoginEnabled(),
@@ -55,77 +58,87 @@ export function createAuthRouter(getDb) {
     res.json(issueCaptcha());
   });
 
-  router.post("/register", (req, res) => {
-    const db = getDb();
-    const { username, password, email, invite_code, captcha_id, captcha_answer } = req.body || {};
-
-    const usernameErr = validateUsername(username);
-    if (usernameErr) return res.status(400).json({ error: usernameErr });
-    const passwordErr = validatePassword(password);
-    if (passwordErr) return res.status(400).json({ error: passwordErr });
-    const emailErr = validateEmail(email);
-    if (emailErr) return res.status(400).json({ error: emailErr });
-
-    const usingInvite = typeof invite_code === "string" && invite_code.trim().length > 0;
-
-    if (!usingInvite) {
-      if (!isOpenRegistrationEnabled()) {
-        return res.status(403).json({ error: "当前为邀请注册模式,请填写邀请码" });
-      }
-      if (!verifyCaptcha(captcha_id, captcha_answer)) {
-        return res.status(400).json({ error: "验证码不正确或已过期,请刷新重试" });
-      }
-    }
-
-    if (getUserByUsername(db, username)) {
-      return res.status(409).json({ error: "用户名已被使用" });
-    }
-    if (email && email.trim()) {
-      const existingByEmail = db
-        .prepare(`SELECT id FROM users WHERE email = ? COLLATE NOCASE`)
-        .get(email.trim());
-      if (existingByEmail) return res.status(409).json({ error: "邮箱已被使用" });
-    }
-
-    let user;
+  router.post("/register", async (req, res, next) => {
     try {
-      const txn = db.transaction(() => {
-        if (usingInvite) {
-          const redeem = redeemInvite(db, invite_code.trim());
-          if (!redeem.ok) throw new Error(`INVITE:${redeem.reason}`);
-        }
-        return createUser(db, { username, email, password, role: "user" });
-      });
-      user = txn();
-    } catch (e) {
-      if (typeof e.message === "string" && e.message.startsWith("INVITE:")) {
-        return res.status(400).json({ error: e.message.slice("INVITE:".length) });
-      }
-      throw e;
-    }
+      const db = getDb();
+      const { username, password, email, invite_code, captcha_id, captcha_answer } = req.body || {};
 
-    const session = createSession(db, user.id);
-    setSessionCookie(req, res, session.token, session.expiresAt);
-    res.json({ user });
+      const usernameErr = validateUsername(username);
+      if (usernameErr) return res.status(400).json({ error: usernameErr });
+      const passwordErr = validatePassword(password);
+      if (passwordErr) return res.status(400).json({ error: passwordErr });
+      const emailErr = validateEmail(email);
+      if (emailErr) return res.status(400).json({ error: emailErr });
+
+      const usingInvite = typeof invite_code === "string" && invite_code.trim().length > 0;
+
+      if (!usingInvite) {
+        if (!isOpenRegistrationEnabled()) {
+          return res.status(403).json({ error: "当前为邀请注册模式,请填写邀请码" });
+        }
+        if (!verifyCaptcha(captcha_id, captcha_answer)) {
+          return res.status(400).json({ error: "验证码不正确或已过期,请刷新重试" });
+        }
+      }
+
+      if (getUserByUsername(db, username)) {
+        return res.status(409).json({ error: "用户名已被使用" });
+      }
+      if (email && email.trim()) {
+        const existingByEmail = db
+          .prepare(`SELECT id FROM users WHERE email = ? COLLATE NOCASE`)
+          .get(email.trim());
+        if (existingByEmail) return res.status(409).json({ error: "邮箱已被使用" });
+      }
+
+      // P4.4 在事务外预先 async hash 密码(bcryptjs 异步分片不阻塞 event loop)
+      // 然后把预计算好的 hash 透传给 createUser,事务里只做 INSERT
+      const passwordHash = await hashPasswordAsync(password);
+
+      let user;
+      try {
+        const txn = db.transaction(() => {
+          if (usingInvite) {
+            const redeem = redeemInvite(db, invite_code.trim());
+            if (!redeem.ok) throw new Error(`INVITE:${redeem.reason}`);
+          }
+          return createUser(db, { username, email, passwordHash, role: "user" });
+        });
+        user = txn();
+      } catch (e) {
+        if (typeof e.message === "string" && e.message.startsWith("INVITE:")) {
+          return res.status(400).json({ error: e.message.slice("INVITE:".length) });
+        }
+        throw e;
+      }
+
+      const session = createSession(db, user.id);
+      setSessionCookie(req, res, session.token, session.expiresAt);
+      res.json({ user });
+    } catch (e) { next(e); }
   });
 
-  router.post("/login", (req, res) => {
-    const db = getDb();
-    const { username, password } = req.body || {};
-    if (typeof username !== "string" || typeof password !== "string") {
-      return res.status(400).json({ error: "请输入用户名和密码" });
-    }
-    const user = getUserByUsername(db, username);
-    // 用相同的话术,不暴露用户存在与否
-    const fail = () => res.status(401).json({ error: "用户名或密码错误" });
-    if (!user) return fail();
-    if (user.status !== "active") return res.status(403).json({ error: "账号已被禁用" });
-    if (!verifyPassword(password, user.password_hash)) return fail();
-    const session = createSession(db, user.id);
-    setSessionCookie(req, res, session.token, session.expiresAt);
-    res.json({
-      user: { id: user.id, username: user.username, email: user.email, role: user.role, status: user.status }
-    });
+  router.post("/login", async (req, res, next) => {
+    try {
+      const db = getDb();
+      const { username, password } = req.body || {};
+      if (typeof username !== "string" || typeof password !== "string") {
+        return res.status(400).json({ error: "请输入用户名和密码" });
+      }
+      const user = getUserByUsername(db, username);
+      // 用相同的话术,不暴露用户存在与否
+      const fail = () => res.status(401).json({ error: "用户名或密码错误" });
+      if (!user) return fail();
+      if (user.status !== "active") return res.status(403).json({ error: "账号已被禁用" });
+      // P4.4 await async bcrypt — 不阻塞 event loop,登录并发能力大幅提升
+      const ok = await verifyPassword(password, user.password_hash);
+      if (!ok) return fail();
+      const session = createSession(db, user.id);
+      setSessionCookie(req, res, session.token, session.expiresAt);
+      res.json({
+        user: { id: user.id, username: user.username, email: user.email, role: user.role, status: user.status }
+      });
+    } catch (e) { next(e); }
   });
 
   router.post("/logout", (req, res) => {

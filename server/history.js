@@ -26,9 +26,17 @@ function ensureDb() {
   if (db) return db;
   fs.mkdirSync(path.dirname(HISTORY_DB_PATH), { recursive: true });
   db = new Database(HISTORY_DB_PATH);
-  db.pragma("journal_mode = WAL");
-  db.pragma("synchronous = NORMAL");
-  db.pragma("foreign_keys = ON");
+
+  // P4.5 SQLite 性能调优 —— 适合"读多写多、单进程"的 BI 场景
+  db.pragma("journal_mode = WAL");          // 已有:并发读 + 写,不阻塞
+  db.pragma("synchronous = NORMAL");        // 已有:WAL 下 NORMAL 已经够安全
+  db.pragma("foreign_keys = ON");           // 已有:约束完整性
+  // ↓ 新增:
+  db.pragma("cache_size = -65536");         // 内存 page cache 上限 64MB(负数 = KB);默认 2MB 不够 25K+ 行业务表
+  db.pragma("mmap_size = 268435456");       // 内存映射 256MB,大表读省一次 memcpy
+  db.pragma("temp_store = MEMORY");         // 临时表 / index 放内存,避免磁盘 IO
+  db.pragma("busy_timeout = 5000");         // 锁冲突时等 5s,不立即报 SQLITE_BUSY
+  db.pragma("wal_autocheckpoint = 1000");   // 每 1000 page 自动 checkpoint,防 WAL 无限增长
 
   ensureUserTables(db);
   bootstrapAdmin(db);

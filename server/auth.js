@@ -17,11 +17,68 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import bcrypt from "bcryptjs";
+import { LRUCache } from "lru-cache";
 
 const SESSION_COOKIE = "tg_session";
 const SESSION_TTL_DAYS = Number(process.env.SESSION_TTL_DAYS || 14);
 const SESSION_TTL_MS = SESSION_TTL_DAYS * 24 * 60 * 60 * 1000;
-const BCRYPT_COST = 12;
+// P4.4 cost 抽出来,测试时 BCRYPT_COST=4 加速;生产环境 SESSION_TTL_DAYS 类似不设也无妨
+const BCRYPT_COST = Number(process.env.BCRYPT_COST || 12);
+if (BCRYPT_COST < 10 && process.env.NODE_ENV === "production") {
+  console.error("[security] BCRYPT_COST < 10 in production is unsafe");
+  process.exit(1);
+}
+
+// ============ P4.3 Session 缓存 ============
+//
+// 每个 /api/* 请求都查 sessions JOIN users。即便 SQLite 本地查询,
+// 仍有 prepared statement / row parse 开销;命中缓存可以省 100% 这部分。
+//
+// 缓存 token → { user, lastTouchAt };TTL 60s,容量 10000
+// 失效策略:
+//   - logout / 改密码 / 禁用账号 → 显式 invalidateUserSessionCache(userId)
+//   - 60s TTL 兜底,失效后下次请求重新拉一次最新 user.status
+const SESSION_CACHE_TTL_MS = Number(process.env.SESSION_CACHE_TTL_MS || 60_000);
+const SESSION_CACHE_MAX = Number(process.env.SESSION_CACHE_MAX || 10_000);
+const LAST_SEEN_TOUCH_INTERVAL_MS = 60_000;
+
+const sessionCache = new LRUCache({
+  max: SESSION_CACHE_MAX,
+  ttl: SESSION_CACHE_TTL_MS,
+  updateAgeOnGet: false
+});
+
+// userId → Set<token>,用于按用户失效该用户所有 token
+const userTokenIndex = new Map();
+
+function trackTokenForUser(userId, token) {
+  let s = userTokenIndex.get(userId);
+  if (!s) { s = new Set(); userTokenIndex.set(userId, s); }
+  s.add(token);
+}
+
+function untrackToken(userId, token) {
+  const s = userTokenIndex.get(userId);
+  if (!s) return;
+  s.delete(token);
+  if (s.size === 0) userTokenIndex.delete(userId);
+}
+
+export function invalidateSessionCache(token) {
+  if (!token) return;
+  const v = sessionCache.get(token);
+  if (v && v.user) untrackToken(v.user.id, token);
+  sessionCache.delete(token);
+}
+
+// 失效该用户所有 session 缓存(改密码 / 禁用账号后调用)
+export function invalidateUserSessionCache(userId) {
+  if (!userId) return;
+  const s = userTokenIndex.get(userId);
+  if (!s) return;
+  for (const t of s) sessionCache.delete(t);
+  userTokenIndex.delete(userId);
+}
 
 // 邀请码字符集:去掉容易混淆的 0/O/1/I/l
 const INVITE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -85,15 +142,28 @@ export function ensureUserTables(db) {
 }
 
 // ---- 密码 ----
+//
+// P4.4 提供同步 + 异步两种 hash 接口:
+//   hashPasswordSync — 给 bootstrap 用,启动一次性,不影响并发
+//   hashPasswordAsync — 给 /register 等高并发路径用,bcryptjs 异步版本会用 setImmediate 切片,
+//                      让 event loop 期间能处理其它请求(虽然不是真线程,但已经避免了 100% 阻塞)
+//   verifyPassword — 默认改成 async,登录全部走异步路径
 
-export function hashPassword(plain) {
+export function hashPasswordSync(plain) {
   return bcrypt.hashSync(plain, BCRYPT_COST);
 }
 
-export function verifyPassword(plain, hash) {
+export async function hashPasswordAsync(plain) {
+  return bcrypt.hash(plain, BCRYPT_COST);
+}
+
+// 旧名字保留为 sync 别名,bootstrapAdmin 等老调用点不动
+export const hashPassword = hashPasswordSync;
+
+export async function verifyPassword(plain, hash) {
   if (!hash) return false;
   try {
-    return bcrypt.compareSync(plain, hash);
+    return await bcrypt.compare(plain, hash);
   } catch {
     return false;
   }
@@ -113,11 +183,40 @@ export function createSession(db, userId) {
     `INSERT INTO sessions(token, user_id, created_at, expires_at, last_seen_at)
      VALUES (?, ?, ?, ?, ?)`
   ).run(token, userId, now.toISOString(), expires.toISOString(), now.toISOString());
+
+  // P4.3 预填缓存,登录成功后立刻命中缓存
+  const userRow = db
+    .prepare(`SELECT id, username, email, phone, role, status FROM users WHERE id = ?`)
+    .get(userId);
+  if (userRow) {
+    sessionCache.set(token, { user: userRow, lastTouchAt: Date.now() });
+    trackTokenForUser(userId, token);
+  }
+
   return { token, expiresAt: expires };
 }
 
 export function getSessionUser(db, token) {
   if (!token) return null;
+
+  // P4.3 缓存命中:省掉一次 DB 查询(每请求节省 0.5-2ms)
+  const cached = sessionCache.get(token);
+  if (cached !== undefined) {
+    if (cached === null) return null; // 负缓存:之前查过不存在 / 已过期
+    // 按时间间隔 throttle last_seen_at 更新,不每个请求都打 DB
+    const nowMs = Date.now();
+    if (nowMs - cached.lastTouchAt > LAST_SEEN_TOUCH_INTERVAL_MS) {
+      cached.lastTouchAt = nowMs;
+      const nowIso = new Date(nowMs).toISOString();
+      try {
+        db.prepare(`UPDATE sessions SET last_seen_at = ? WHERE token = ?`).run(nowIso, token);
+        db.prepare(`UPDATE users SET last_seen_at = ? WHERE id = ?`).run(nowIso, cached.user.id);
+      } catch { /* touch 失败不影响身份验证 */ }
+    }
+    return cached.user;
+  }
+
+  // 缓存未命中,查 DB
   const row = db
     .prepare(
       `SELECT s.token, s.expires_at, s.user_id,
@@ -127,27 +226,53 @@ export function getSessionUser(db, token) {
        WHERE s.token = ?`
     )
     .get(token);
-  if (!row) return null;
-  if (row.status !== "active") return null;
-  if (new Date(row.expires_at).getTime() < Date.now()) {
-    db.prepare(`DELETE FROM sessions WHERE token = ?`).run(token);
+
+  if (!row) {
+    sessionCache.set(token, null); // 负缓存,避免反复查不存在的 token
     return null;
   }
-  // touch last_seen_at(轻量,不更新 expires_at,session 到期就是到期)
+  if (row.status !== "active") {
+    sessionCache.set(token, null);
+    return null;
+  }
+  if (new Date(row.expires_at).getTime() < Date.now()) {
+    db.prepare(`DELETE FROM sessions WHERE token = ?`).run(token);
+    sessionCache.set(token, null);
+    return null;
+  }
+
+  const user = {
+    id: row.id, username: row.username, email: row.email, phone: row.phone,
+    role: row.role, status: row.status
+  };
+
+  // 首次命中:touch last_seen_at,再写缓存
   const nowIso = new Date().toISOString();
-  db.prepare(`UPDATE sessions SET last_seen_at = ? WHERE token = ?`).run(nowIso, token);
-  db.prepare(`UPDATE users SET last_seen_at = ? WHERE id = ?`).run(nowIso, row.user_id);
-  return { id: row.id, username: row.username, email: row.email, phone: row.phone, role: row.role, status: row.status };
+  try {
+    db.prepare(`UPDATE sessions SET last_seen_at = ? WHERE token = ?`).run(nowIso, token);
+    db.prepare(`UPDATE users SET last_seen_at = ? WHERE id = ?`).run(nowIso, row.user_id);
+  } catch { /* 同上 */ }
+
+  sessionCache.set(token, { user, lastTouchAt: Date.now() });
+  trackTokenForUser(user.id, token);
+  return user;
 }
 
 export function destroySession(db, token) {
   if (!token) return;
+  invalidateSessionCache(token);
   db.prepare(`DELETE FROM sessions WHERE token = ?`).run(token);
 }
 
 export function pruneExpiredSessions(db) {
   const now = new Date().toISOString();
+  // 拿到将被删的 token 列表,顺便清缓存(避免缓存里挂着已删的 session)
+  const expiredTokens = db
+    .prepare(`SELECT token FROM sessions WHERE expires_at < ?`)
+    .all(now)
+    .map((r) => r.token);
   const result = db.prepare(`DELETE FROM sessions WHERE expires_at < ?`).run(now);
+  for (const t of expiredTokens) invalidateSessionCache(t);
   return result.changes;
 }
 
@@ -301,9 +426,16 @@ export function validatePhone(phone) {
   return null;
 }
 
-export function createUser(db, { username, email, phone, password, role = "user" }) {
-  // 至少有 password 或 phone 中一个(纯 SMS 用户没有密码,用随机不可登的 hash 占位)
-  const hash = password ? hashPassword(password) : hashPassword(crypto.randomBytes(16).toString("hex"));
+// P4.4 接受 password(sync hash) 或 passwordHash(预先 async hash,推荐高并发路径用)
+// 函数本身保持 sync,因为通常在 db.transaction(() => {}) 同步回调里调用
+export function createUser(db, { username, email, phone, password, passwordHash, role = "user" }) {
+  // 至少有 password / passwordHash / phone 中一个;纯 SMS 用户用随机不可登 hash 占位
+  let hash = passwordHash;
+  if (!hash) {
+    hash = password
+      ? hashPasswordSync(password)
+      : hashPasswordSync(crypto.randomBytes(16).toString("hex"));
+  }
   const stmt = db.prepare(
     `INSERT INTO users(username, email, phone, password_hash, role, status, created_at)
      VALUES (?, ?, ?, ?, ?, 'active', ?)`
@@ -439,6 +571,12 @@ export function updateUser(db, id, { status, role }) {
   if (!sets.length) return false;
   params.push(id);
   const result = db.prepare(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`).run(...params);
+
+  // P4.3 status / role 改动:立即失效该用户所有 session 缓存,避免最长 60s 的 stale
+  // 禁用账号后,这次改动后下一次请求就会拒绝(从 DB 重新查到 status=disabled → null)
+  if (result.changes > 0) {
+    invalidateUserSessionCache(id);
+  }
   return result.changes > 0;
 }
 

@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
+import compression from "compression";
 import * as fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -99,6 +100,19 @@ app.use(
 );
 app.use(express.json({ limit: "16mb" }));
 app.use(cookieParser());
+
+// P4.3 性能:gzip 压缩响应,JSON / HTML / JS / CSS 体积通常降 70-85%
+// 注意:若前置 nginx 也开了 gzip 会双重压缩,二选一(我们用 Node 这层)
+app.use(
+  compression({
+    threshold: 1024, // < 1KB 不压(开销不值)
+    level: 6,
+    filter(req, res) {
+      if (req.headers["x-no-compression"]) return false;
+      return compression.filter(req, res);
+    }
+  })
+);
 
 // ---- 路由顺序 ----
 //
@@ -496,7 +510,11 @@ app.use(
   express.static(path.join(rootDir, "dist"), {
     setHeaders(res, filePath) {
       if (filePath.endsWith(".html")) {
+        // SPA 入口必须及时拿到新版本,不缓存
         res.set("Cache-Control", "no-store");
+      } else if (/\.(js|css|woff2?|png|jpe?g|svg|webp|ico)$/.test(filePath)) {
+        // Vite 打包产物名带 hash → 可以长期缓存,immutable 减少 If-None-Match 校验
+        res.set("Cache-Control", "public, max-age=31536000, immutable");
       }
     }
   })
