@@ -8,7 +8,7 @@ import { MetricCard } from "./ui/MetricCard";
 import { WeeklyMatrix, type WeeklyMetric } from "./ui/WeeklyMatrix";
 import { fmtInt, fmtMoney, fmtNumber, fmtPercent } from "./utils/format";
 
-type ViewKey = "product" | "ad-products" | "keywords" | "crowds" | "contents" | "sources";
+type ViewKey = "product" | "ad-products" | "keywords" | "crowds" | "contents" | "sources" | "admin";
 
 type MetaSource = {
   id: string;
@@ -59,13 +59,14 @@ type KeywordDrilldown = "spendDaily";
 type CrowdDrilldown = "spendDaily";
 type ContentDrilldown = "spendDaily";
 
-const navItems: Array<{ key: ViewKey; label: string; icon: React.ComponentType<{ size?: number }> }> = [
+const navItems: Array<{ key: ViewKey; label: string; icon: React.ComponentType<{ size?: number }>; adminOnly?: boolean }> = [
   { key: "product", label: "商品维度分析", icon: Boxes },
   { key: "ad-products", label: "推广商品分析", icon: Megaphone },
   { key: "keywords", label: "推广关键词分析", icon: Search },
   { key: "crowds", label: "推广人群分析", icon: Users },
   { key: "contents", label: "推广内容分析", icon: WandSparkles },
-  { key: "sources", label: "源数据", icon: FileSpreadsheet }
+  { key: "sources", label: "源数据", icon: FileSpreadsheet },
+  { key: "admin", label: "管理", icon: Brain, adminOnly: true }
 ];
 
 const sourceUploadSlots = [
@@ -401,14 +402,620 @@ function useApi<T>(active: ViewKey, filters: Filters) {
   return { data, loading, error };
 }
 
-function App() {
+// =============================================================
+// 账号系统 (P4):登录 / 邀请码注册 / 管理员后台
+// =============================================================
+
+type User = {
+  id: number;
+  username: string;
+  email: string | null;
+  role: "admin" | "user";
+  status: "active" | "disabled";
+};
+
+type AuthFeatures = {
+  open_registration: boolean;
+  sms_login: boolean;
+  sms_provider: string;
+};
+
+const DEFAULT_FEATURES: AuthFeatures = { open_registration: true, sms_login: true, sms_provider: "dev" };
+
+type AuthState = {
+  user: User | null;
+  loading: boolean;
+  features: AuthFeatures;
+  refresh: () => Promise<void>;
+};
+
+function useAuth(): AuthState {
+  const [user, setUser] = React.useState<User | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [features, setFeatures] = React.useState<AuthFeatures>(DEFAULT_FEATURES);
+  const refresh = React.useCallback(async () => {
+    try {
+      const res = await fetch("/api/auth/me", { credentials: "include" });
+      if (res.ok) {
+        const json = await res.json();
+        setUser(json.user || null);
+      } else {
+        setUser(null);
+      }
+    } catch {
+      setUser(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+  React.useEffect(() => {
+    refresh();
+    fetch("/api/auth/features", { credentials: "include" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((json) => { if (json) setFeatures({ ...DEFAULT_FEATURES, ...json }); })
+      .catch(() => { /* 失败时维持默认全开,体验最差不过是个按钮无效 */ });
+  }, [refresh]);
+  return { user, loading, features, refresh };
+}
+
+const authShell: React.CSSProperties = {
+  minHeight: "100vh",
+  display: "grid",
+  placeItems: "center",
+  background: "#10140c",
+  padding: 16
+};
+const authCard: React.CSSProperties = {
+  width: 380,
+  padding: 32,
+  borderRadius: 12,
+  border: "1px solid rgba(245, 200, 119, 0.22)",
+  background: "#151808",
+  boxShadow: "0 18px 40px rgba(0,0,0,0.45)"
+};
+const authTitle: React.CSSProperties = { margin: 0, marginBottom: 4, fontSize: 22, color: "#f5c877" };
+const authSub: React.CSSProperties = { margin: 0, marginBottom: 24, fontSize: 13, color: "rgba(245, 240, 223, 0.65)" };
+const authField: React.CSSProperties = { display: "block", marginBottom: 14 };
+const authLabel: React.CSSProperties = { display: "block", marginBottom: 6, fontSize: 12, color: "rgba(245, 240, 223, 0.7)" };
+const authInput: React.CSSProperties = {
+  width: "100%", padding: "10px 12px", borderRadius: 6,
+  border: "1px solid rgba(245, 200, 119, 0.2)", background: "#10140c", color: "#f5f0df", fontSize: 14
+};
+const authBtn: React.CSSProperties = {
+  width: "100%", padding: "11px 12px", borderRadius: 6, border: "none",
+  background: "#f5c877", color: "#10140c", fontWeight: 600, fontSize: 14, cursor: "pointer", marginTop: 8
+};
+const authLink: React.CSSProperties = {
+  display: "block", textAlign: "center", marginTop: 16, fontSize: 13, color: "#f5c877", textDecoration: "none"
+};
+const authError: React.CSSProperties = {
+  marginTop: 8, marginBottom: 4, padding: "8px 10px", borderRadius: 6,
+  background: "rgba(229, 80, 80, 0.12)", border: "1px solid rgba(229, 80, 80, 0.4)", color: "#ffb3b3", fontSize: 13
+};
+
+function LoginView({ onAuthChange, features }: { onAuthChange: () => Promise<void>; features: AuthFeatures }) {
+  const [tab, setTab] = React.useState<"password" | "sms">("password");
+  const tabStyle = (active: boolean): React.CSSProperties => ({
+    flex: 1, padding: "10px 0", textAlign: "center", cursor: "pointer",
+    borderBottom: active ? "2px solid #f5c877" : "2px solid transparent",
+    color: active ? "#f5c877" : "rgba(245, 240, 223, 0.5)",
+    fontWeight: 600, fontSize: 14, userSelect: "none"
+  });
+  return (
+    <div style={authShell}>
+      <div style={authCard}>
+        <h1 style={authTitle}>货盘分析 BI</h1>
+        <p style={authSub}>商品经营 / 推广投放 — 请登录</p>
+        {features.sms_login && (
+          <div style={{ display: "flex", marginBottom: 18, borderBottom: "1px solid rgba(245, 200, 119, 0.15)" }}>
+            <div style={tabStyle(tab === "password")} onClick={() => setTab("password")}>账号密码</div>
+            <div style={tabStyle(tab === "sms")} onClick={() => setTab("sms")}>手机短信</div>
+          </div>
+        )}
+        {features.sms_login && tab === "sms" ? <SmsLoginForm onAuthChange={onAuthChange} /> : <PasswordLoginForm onAuthChange={onAuthChange} />}
+        {features.open_registration && <a href="#/register" style={authLink}>没有账号? 立即注册 →</a>}
+      </div>
+    </div>
+  );
+}
+
+function PasswordLoginForm({ onAuthChange }: { onAuthChange: () => Promise<void> }) {
+  const [username, setUsername] = React.useState("");
+  const [password, setPassword] = React.useState("");
+  const [err, setErr] = React.useState("");
+  const [submitting, setSubmitting] = React.useState(false);
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setSubmitting(true);
+    setErr("");
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ username, password })
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) { setErr(json.error || `登录失败 (HTTP ${res.status})`); return; }
+      await onAuthChange();
+      window.location.hash = "#product";
+    } finally { setSubmitting(false); }
+  }
+  return (
+    <form onSubmit={submit}>
+      <label style={authField}>
+        <span style={authLabel}>用户名</span>
+        <input style={authInput} autoFocus value={username} onChange={(e) => setUsername(e.target.value)} />
+      </label>
+      <label style={authField}>
+        <span style={authLabel}>密码</span>
+        <input style={authInput} type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+      </label>
+      {err && <div style={authError}>{err}</div>}
+      <button type="submit" style={authBtn} disabled={submitting}>
+        {submitting ? "登录中..." : "登录"}
+      </button>
+    </form>
+  );
+}
+
+function SmsLoginForm({ onAuthChange }: { onAuthChange: () => Promise<void> }) {
+  const [phone, setPhone] = React.useState("");
+  const [code, setCode] = React.useState("");
+  const [err, setErr] = React.useState("");
+  const [info, setInfo] = React.useState("");
+  const [submitting, setSubmitting] = React.useState(false);
+  const [sending, setSending] = React.useState(false);
+  const [cooldown, setCooldown] = React.useState(0);
+
+  React.useEffect(() => {
+    if (cooldown <= 0) return;
+    const t = setTimeout(() => setCooldown(cooldown - 1), 1000);
+    return () => clearTimeout(t);
+  }, [cooldown]);
+
+  async function sendCode() {
+    setErr(""); setInfo("");
+    if (!/^1[3-9]\d{9}$/.test(phone.trim())) { setErr("手机号格式不正确(11 位中国大陆号码)"); return; }
+    setSending(true);
+    try {
+      const res = await fetch("/api/auth/sms/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ phone: phone.trim() })
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) { setErr(json.error || `发送失败 (HTTP ${res.status})`); return; }
+      setCooldown(60);
+      if (json.provider === "dev" && json.devCode) {
+        setInfo(`[dev 模式] 验证码已生成:${json.devCode}(生产环境会发到手机)`);
+      } else {
+        setInfo("验证码已发送,请查收短信");
+      }
+    } finally { setSending(false); }
+  }
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setSubmitting(true); setErr("");
+    try {
+      const res = await fetch("/api/auth/sms/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ phone: phone.trim(), code: code.trim() })
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) { setErr(json.error || `登录失败 (HTTP ${res.status})`); return; }
+      await onAuthChange();
+      window.location.hash = "#product";
+    } finally { setSubmitting(false); }
+  }
+
+  return (
+    <form onSubmit={submit}>
+      <label style={authField}>
+        <span style={authLabel}>手机号</span>
+        <input style={authInput} autoFocus value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="11 位手机号" inputMode="numeric" />
+      </label>
+      <label style={authField}>
+        <span style={authLabel}>短信验证码</span>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input style={{ ...authInput, flex: 1 }} value={code} onChange={(e) => setCode(e.target.value)} placeholder="6 位验证码" inputMode="numeric" maxLength={6} />
+          <button type="button" onClick={sendCode} disabled={sending || cooldown > 0}
+            style={{
+              padding: "10px 12px", borderRadius: 6, border: "1px solid rgba(245, 200, 119, 0.4)",
+              background: "transparent", color: cooldown > 0 ? "rgba(245, 200, 119, 0.4)" : "#f5c877",
+              fontSize: 13, cursor: cooldown > 0 ? "default" : "pointer", whiteSpace: "nowrap"
+            }}>
+            {cooldown > 0 ? `${cooldown}s` : sending ? "发送中..." : "获取验证码"}
+          </button>
+        </div>
+      </label>
+      {info && <div style={{ ...authError, background: "rgba(120, 200, 120, 0.12)", border: "1px solid rgba(120, 200, 120, 0.4)", color: "#a8d8a8" }}>{info}</div>}
+      {err && <div style={authError}>{err}</div>}
+      <button type="submit" style={authBtn} disabled={submitting}>
+        {submitting ? "登录中..." : "登录 / 注册"}
+      </button>
+    </form>
+  );
+}
+
+function RegisterView({ onAuthChange, features }: { onAuthChange: () => Promise<void>; features: AuthFeatures }) {
+  const initialInvite = React.useMemo(() => {
+    const m = window.location.hash.match(/[?&]invite=([^&]+)/);
+    return m ? decodeURIComponent(m[1]) : "";
+  }, []);
+  const inviteOnlyMode = !features.open_registration;
+  const [username, setUsername] = React.useState("");
+  const [password, setPassword] = React.useState("");
+  const [confirm, setConfirm] = React.useState("");
+  const [email, setEmail] = React.useState("");
+  const [invite, setInvite] = React.useState(initialInvite);
+  const [showInvite, setShowInvite] = React.useState(inviteOnlyMode || Boolean(initialInvite));
+  const [captcha, setCaptcha] = React.useState<{ id: string; question: string } | null>(null);
+  const [captchaAnswer, setCaptchaAnswer] = React.useState("");
+  const [err, setErr] = React.useState("");
+  const [submitting, setSubmitting] = React.useState(false);
+
+  const refreshCaptcha = React.useCallback(async () => {
+    if (inviteOnlyMode) return;
+    try {
+      const res = await fetch("/api/auth/captcha", { credentials: "include" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      setCaptcha({ id: json.id, question: json.question });
+      setCaptchaAnswer("");
+    } catch (e) {
+      setCaptcha(null);
+    }
+  }, [inviteOnlyMode]);
+
+  React.useEffect(() => { refreshCaptcha(); }, [refreshCaptcha]);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (password !== confirm) { setErr("两次输入的密码不一致"); return; }
+    if (inviteOnlyMode && !invite.trim()) { setErr("当前为邀请注册模式,请输入邀请码"); return; }
+    setSubmitting(true);
+    setErr("");
+    try {
+      const body: Record<string, unknown> = { username, password, email: email || undefined };
+      if (invite.trim()) {
+        body.invite_code = invite.trim();
+      } else {
+        if (!captcha) { setErr("验证码尚未加载,请稍候"); return; }
+        body.captcha_id = captcha.id;
+        body.captcha_answer = captchaAnswer;
+      }
+      const res = await fetch("/api/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(body)
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setErr(json.error || `注册失败 (HTTP ${res.status})`);
+        if (!invite.trim() && !inviteOnlyMode) refreshCaptcha();
+        return;
+      }
+      await onAuthChange();
+      window.location.hash = "#product";
+    } finally { setSubmitting(false); }
+  }
+
+  return (
+    <div style={authShell}>
+      <form onSubmit={submit} style={authCard}>
+        <h1 style={{ ...authTitle, marginBottom: 24 }}>注册新账号</h1>
+        <label style={authField}>
+          <span style={authLabel}>用户名</span>
+          <input style={authInput} autoFocus value={username} onChange={(e) => setUsername(e.target.value)} />
+        </label>
+        <label style={authField}>
+          <span style={authLabel}>邮箱 (选填,用于将来密码找回)</span>
+          <input style={authInput} type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
+        </label>
+        <label style={authField}>
+          <span style={authLabel}>密码 (至少 8 位)</span>
+          <input style={authInput} type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+        </label>
+        <label style={authField}>
+          <span style={authLabel}>确认密码</span>
+          <input style={authInput} type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
+        </label>
+
+        {!inviteOnlyMode && !invite.trim() && (
+          <label style={authField}>
+            <span style={authLabel}>验证码 (回答下面的算术题)</span>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <div style={{
+                padding: "10px 14px", borderRadius: 6,
+                border: "1px solid rgba(245, 200, 119, 0.2)", background: "#10140c",
+                color: "#f5c877", fontFamily: "monospace", fontSize: 16, minWidth: 110, textAlign: "center"
+              }}>{captcha?.question || "加载中..."}</div>
+              <input style={{ ...authInput, flex: 1 }} value={captchaAnswer}
+                onChange={(e) => setCaptchaAnswer(e.target.value)}
+                placeholder="答案" inputMode="numeric" />
+              <button type="button" onClick={refreshCaptcha} title="换一题"
+                style={{
+                  padding: "10px 12px", borderRadius: 6, border: "1px solid rgba(245, 200, 119, 0.3)",
+                  background: "transparent", color: "#f5c877", cursor: "pointer", fontSize: 13
+                }}>换一题</button>
+            </div>
+          </label>
+        )}
+
+        {showInvite ? (
+          <label style={authField}>
+            <span style={authLabel}>{inviteOnlyMode ? "邀请码 (必填)" : "邀请码 (选填,有邀请码时优先用此通道)"}</span>
+            <input style={authInput} value={invite} onChange={(e) => setInvite(e.target.value)} />
+          </label>
+        ) : (
+          <a onClick={() => setShowInvite(true)} style={{ ...authLink, marginTop: 0, marginBottom: 10, cursor: "pointer" }}>
+            有邀请码? 点这里填 →
+          </a>
+        )}
+
+        {err && <div style={authError}>{err}</div>}
+        <button type="submit" style={authBtn} disabled={submitting}>
+          {submitting ? "注册中..." : "注册并登录"}
+        </button>
+        <a href="#/login" style={authLink}>已有账号? 去登录 →</a>
+      </form>
+    </div>
+  );
+}
+
+type Invite = {
+  code: string; created_by: number; created_at: string;
+  expires_at: string | null; max_uses: number; used_count: number;
+  note: string | null; created_by_username: string | null;
+};
+
+type AdminUser = User & { created_at?: string; last_seen_at?: string | null };
+
+function AdminView() {
+  const [tab, setTab] = React.useState<"invites" | "users">("invites");
+  const [invites, setInvites] = React.useState<Invite[]>([]);
+  const [users, setUsers] = React.useState<AdminUser[]>([]);
+  const [loading, setLoading] = React.useState(false);
+  const [err, setErr] = React.useState("");
+  const [note, setNote] = React.useState("");
+  const [maxUses, setMaxUses] = React.useState(1);
+
+  const reload = React.useCallback(async () => {
+    setLoading(true); setErr("");
+    try {
+      if (tab === "invites") {
+        const res = await fetch("/api/admin/invites", { credentials: "include" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = await res.json();
+        setInvites(json.invites || []);
+      } else {
+        const res = await fetch("/api/admin/users", { credentials: "include" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = await res.json();
+        setUsers(json.users || []);
+      }
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : "加载失败");
+    } finally { setLoading(false); }
+  }, [tab]);
+  React.useEffect(() => { reload(); }, [reload]);
+
+  async function createInvite() {
+    setErr("");
+    try {
+      const res = await fetch("/api/admin/invites", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ max_uses: maxUses, note: note || undefined })
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
+      setNote(""); setMaxUses(1); await reload();
+    } catch (e: unknown) { setErr(e instanceof Error ? e.message : "操作失败"); }
+  }
+  async function deleteInvite(code: string) {
+    if (!window.confirm(`确定删除邀请码 ${code}?`)) return;
+    setErr("");
+    try {
+      const res = await fetch(`/api/admin/invites/${encodeURIComponent(code)}`, { method: "DELETE", credentials: "include" });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
+      await reload();
+    } catch (e: unknown) { setErr(e instanceof Error ? e.message : "操作失败"); }
+  }
+  async function updateUserStatus(id: number, status: "active" | "disabled") {
+    setErr("");
+    try {
+      const res = await fetch(`/api/admin/users/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ status })
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
+      await reload();
+    } catch (e: unknown) { setErr(e instanceof Error ? e.message : "操作失败"); }
+  }
+  const registerUrlFor = (code: string) =>
+    `${window.location.origin}/#/register?invite=${encodeURIComponent(code)}`;
+
+  const tabBtn = (active: boolean): React.CSSProperties => ({
+    padding: "8px 14px", borderRadius: 6,
+    border: "1px solid rgba(245, 200, 119, 0.3)",
+    background: active ? "#f5c877" : "transparent",
+    color: active ? "#10140c" : "#f5f0df",
+    cursor: "pointer", fontWeight: 600
+  });
+  const th: React.CSSProperties = { textAlign: "left", padding: "10px 8px" };
+  const td: React.CSSProperties = { padding: "10px 8px" };
+  const muted: React.CSSProperties = { fontSize: 12, color: "rgba(245,240,223,0.7)" };
+
+  return (
+    <div style={{ padding: "8px 0 32px" }}>
+      <div style={{ display: "flex", gap: 12, marginBottom: 18 }}>
+        <button onClick={() => setTab("invites")} style={tabBtn(tab === "invites")}>邀请码</button>
+        <button onClick={() => setTab("users")} style={tabBtn(tab === "users")}>用户列表</button>
+      </div>
+      {err && <div style={authError}>{err}</div>}
+
+      {tab === "invites" && (
+        <div>
+          <div style={{
+            padding: 16, borderRadius: 10, border: "1px solid rgba(245, 200, 119, 0.18)",
+            background: "#151808", marginBottom: 18,
+            display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap"
+          }}>
+            <label style={{ flex: 1, minWidth: 200 }}>
+              <span style={authLabel}>说明 (选填)</span>
+              <input style={authInput} value={note} onChange={(e) => setNote(e.target.value)} placeholder="给谁用 / 备注" />
+            </label>
+            <label style={{ width: 140 }}>
+              <span style={authLabel}>可用次数</span>
+              <input style={authInput} type="number" min={1} value={maxUses}
+                onChange={(e) => setMaxUses(Math.max(1, Number(e.target.value) || 1))} />
+            </label>
+            <button onClick={createInvite} style={{ ...authBtn, width: "auto", padding: "10px 18px", marginTop: 0 }}>
+              生成邀请码
+            </button>
+          </div>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ borderBottom: "1px solid rgba(245, 200, 119, 0.2)", color: "rgba(245, 240, 223, 0.7)", fontSize: 12 }}>
+                <th style={th}>邀请码</th><th style={th}>注册链接</th><th style={th}>用量</th>
+                <th style={th}>创建时间</th><th style={th}>说明</th><th style={{ width: 80 }}></th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading && <tr><td colSpan={6} style={td}>加载中...</td></tr>}
+              {!loading && invites.length === 0 && (
+                <tr><td colSpan={6} style={{ ...td, color: "rgba(245,240,223,0.5)" }}>还没有邀请码,点上方按钮生成一个</td></tr>
+              )}
+              {invites.map((inv) => (
+                <tr key={inv.code} style={{ borderBottom: "1px solid rgba(245, 200, 119, 0.08)" }}>
+                  <td style={{ ...td, fontFamily: "monospace", color: "#f5c877" }}>{inv.code}</td>
+                  <td style={td}>
+                    <button onClick={() => navigator.clipboard?.writeText(registerUrlFor(inv.code))}
+                      style={{
+                        border: "1px solid rgba(245, 200, 119, 0.3)", background: "transparent",
+                        color: "#f5c877", padding: "4px 8px", borderRadius: 4, cursor: "pointer", fontSize: 12
+                      }}>复制注册链接</button>
+                  </td>
+                  <td style={td}>{inv.used_count} / {inv.max_uses}</td>
+                  <td style={{ ...td, ...muted }}>{inv.created_at.slice(0, 19).replace("T", " ")}</td>
+                  <td style={{ ...td, fontSize: 12 }}>{inv.note || "—"}</td>
+                  <td style={{ ...td, textAlign: "right" }}>
+                    <button onClick={() => deleteInvite(inv.code)}
+                      style={{
+                        border: "1px solid rgba(229, 80, 80, 0.4)", background: "transparent",
+                        color: "#ffb3b3", padding: "4px 10px", borderRadius: 4, cursor: "pointer"
+                      }}>删除</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {tab === "users" && (
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead>
+            <tr style={{ borderBottom: "1px solid rgba(245, 200, 119, 0.2)", color: "rgba(245, 240, 223, 0.7)", fontSize: 12 }}>
+              <th style={th}>ID</th><th style={th}>用户名</th><th style={th}>邮箱</th>
+              <th style={th}>角色</th><th style={th}>状态</th>
+              <th style={th}>注册时间</th><th style={th}>最近登录</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && <tr><td colSpan={8} style={td}>加载中...</td></tr>}
+            {!loading && users.map((u) => (
+              <tr key={u.id} style={{ borderBottom: "1px solid rgba(245, 200, 119, 0.08)" }}>
+                <td style={td}>{u.id}</td>
+                <td style={td}>{u.username}</td>
+                <td style={{ ...td, ...muted }}>{u.email || "—"}</td>
+                <td style={td}>
+                  <span style={{
+                    padding: "2px 8px", borderRadius: 4,
+                    background: u.role === "admin" ? "rgba(245, 200, 119, 0.15)" : "rgba(245, 240, 223, 0.08)",
+                    color: u.role === "admin" ? "#f5c877" : "#f5f0df", fontSize: 12
+                  }}>{u.role}</span>
+                </td>
+                <td style={td}>
+                  <span style={{
+                    padding: "2px 8px", borderRadius: 4,
+                    background: u.status === "active" ? "rgba(120, 200, 120, 0.15)" : "rgba(229, 80, 80, 0.15)",
+                    color: u.status === "active" ? "#a8d8a8" : "#ffb3b3", fontSize: 12
+                  }}>{u.status}</span>
+                </td>
+                <td style={{ ...td, ...muted }}>{u.created_at?.slice(0, 10) || "—"}</td>
+                <td style={{ ...td, ...muted }}>{u.last_seen_at?.slice(0, 19).replace("T", " ") || "—"}</td>
+                <td style={{ ...td, textAlign: "right" }}>
+                  <button onClick={() => updateUserStatus(u.id, u.status === "active" ? "disabled" : "active")}
+                    style={{
+                      border: "1px solid rgba(245, 200, 119, 0.3)", background: "transparent",
+                      color: "#f5c877", padding: "4px 10px", borderRadius: 4, cursor: "pointer", fontSize: 12
+                    }}>{u.status === "active" ? "禁用" : "启用"}</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function RootApp() {
+  const auth = useAuth();
+  const [hash, setHash] = React.useState(window.location.hash);
+  React.useEffect(() => {
+    const onHash = () => setHash(window.location.hash);
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  if (auth.loading) {
+    return (
+      <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "#10140c", color: "#f5c877" }}>
+        <span>正在加载...</span>
+      </div>
+    );
+  }
+  if (!auth.user) {
+    const route = hash.replace(/^#\/?/, "").split("?")[0];
+    if (route === "register") return <RegisterView onAuthChange={auth.refresh} features={auth.features} />;
+    return <LoginView onAuthChange={auth.refresh} features={auth.features} />;
+  }
+  return <App auth={auth} />;
+}
+
+async function logout(refresh: () => Promise<void>) {
+  await fetch("/api/auth/logout", { method: "POST", credentials: "include" }).catch(() => {});
+  await refresh();
+  window.location.hash = "#/login";
+}
+
+function App({ auth }: { auth: AuthState }) {
   const [active, setActive] = React.useState<ViewKey>(() => viewFromHash());
   const [filters, setFilters] = React.useState<Filters>({ start: "", end: "", scene: "", q: "" });
   const [meta, setMeta] = React.useState<Meta | null>(null);
+  // useApi 内部对 endpoints[active] 不存在的 view (sources / admin) 会短路,不发请求
   const { data, loading, error } = useApi<Record<string, unknown>>(active, filters);
 
+  // 守卫:非 admin 闯入 #admin → 弹回商品页
   React.useEffect(() => {
-    fetch("/api/meta")
+    if (active === "admin" && auth.user?.role !== "admin") {
+      window.location.hash = "#product";
+    }
+  }, [active, auth.user?.role]);
+
+  React.useEffect(() => {
+    fetch("/api/meta", { credentials: "include" })
       .then((res) => res.json())
       .then(setMeta)
       .catch(() => setMeta(null));
@@ -450,15 +1057,17 @@ function App() {
           </div>
         </div>
         <nav className="navList" aria-label="主导航">
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            return (
-              <button key={item.key} className={active === item.key ? "navItem active" : "navItem"} onClick={() => activateView(item.key)}>
-                <Icon size={18} />
-                <span>{item.label}</span>
-              </button>
-            );
-          })}
+          {navItems
+            .filter((item) => !item.adminOnly || auth.user?.role === "admin")
+            .map((item) => {
+              const Icon = item.icon;
+              return (
+                <button key={item.key} className={active === item.key ? "navItem active" : "navItem"} onClick={() => activateView(item.key)}>
+                  <Icon size={18} />
+                  <span>{item.label}</span>
+                </button>
+              );
+            })}
         </nav>
         <div className="sourceBadge">
           <Upload size={16} />
@@ -471,6 +1080,24 @@ function App() {
           <div>
             <p className="eyebrow">Web 端展示</p>
             <h1>{activeTitle}</h1>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginRight: 16, fontSize: 13 }}>
+            <span style={{ color: "rgba(245, 240, 223, 0.6)" }}>登录:</span>
+            <strong style={{ color: "#f5c877" }}>{auth.user?.username}</strong>
+            {auth.user?.role === "admin" && (
+              <span style={{
+                fontSize: 11, padding: "2px 8px", borderRadius: 4,
+                background: "rgba(245, 200, 119, 0.18)", color: "#f5c877"
+              }}>admin</span>
+            )}
+            <button
+              onClick={() => logout(auth.refresh)}
+              style={{
+                marginLeft: 8, padding: "4px 10px", borderRadius: 4, cursor: "pointer",
+                border: "1px solid rgba(245, 200, 119, 0.3)", background: "transparent",
+                color: "#f5f0df", fontSize: 12
+              }}
+            >退出</button>
           </div>
           <div className="filters">
             <label>
@@ -514,6 +1141,7 @@ function App() {
         {loading && <div className="stateLine">正在按当前筛选重算指标...</div>}
         {error && <div className="stateLine error">数据服务异常：{error}</div>}
         {!error && active === "sources" && <SourcesView meta={meta} onMetaChange={setMeta} />}
+        {!error && active === "admin" && auth.user?.role === "admin" && <AdminView />}
         {!error && active === "product" && data && <ProductView data={data} />}
         {!error && active === "ad-products" && data && <AdProductsView data={data} />}
         {!error && active === "keywords" && data && <KeywordView data={data} />}
@@ -1904,6 +2532,6 @@ function shortText(text: string, max: number) {
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    <RootApp />
   </React.StrictMode>
 );

@@ -3,9 +3,11 @@
 适用场景：
 - 主域名 `shaozhuangai.com` 已经有云服务器在跑（且服务器上已有 nginx 在工作）
 - 希望把 tuiguang 部署成同台服务器上的一个子站 `tuiguang.shaozhuangai.com`
-- 公网可访，HTTPS + Basic Auth 口令保护
+- 公网可访，HTTPS 加密 + **应用层账号登录(cookie session + 邀请码注册)**
 
 如果你是**全新**云主机、没有主域名，请改看 [standalone-deploy.md](standalone-deploy.md)。
+
+> 历史变更:从 P4 起,nginx 层的 Basic Auth 已下线,改由应用接管登录;首次部署需要通过环境变量引导首个管理员。
 
 ---
 
@@ -80,8 +82,19 @@ nano .env       # 修改 UPLOADS_HOST_DIR、APP_BIND_PORT 等
 ```dotenv
 APP_BIND_PORT=5180
 UPLOADS_HOST_DIR=/var/lib/tuiguang/uploads
+DATA_HOST_DIR=/var/lib/tuiguang/data
 UPLOAD_MAX_MB=100
 TZ=Asia/Shanghai
+
+# 首次部署:引导首个管理员账号(只在 users 表为空时生效;创建完后建议清掉密码)
+ADMIN_BOOTSTRAP_USERNAME=admin
+ADMIN_BOOTSTRAP_PASSWORD=<改成 12 位以上强密码>
+SESSION_TTL_DAYS=14
+
+# 部署初期推荐"邀请码 only"模式:SMS 没接好之前避免用户进 SMS 入口看到错误
+# 阿里云签名审核通过后,这两个可以改回 true,并补 SMS_PROVIDER=aliyun + 4 个凭据
+AUTH_OPEN_REGISTRATION=false   # 关闭开放注册;只能用邀请码注册
+AUTH_SMS_LOGIN=false           # 隐藏"手机短信"登录入口
 ```
 
 准备 uploads + 历史库目录：
@@ -90,7 +103,7 @@ sudo mkdir -p /var/lib/tuiguang/uploads /var/lib/tuiguang/data
 sudo chown -R 1000:1000 /var/lib/tuiguang   # 容器内 node 用户 UID 1000
 ```
 
-> P1 起新增 SQLite 历史库（`/var/lib/tuiguang/data/history.sqlite`），跟 uploads 一样必须挂卷持久化 + 备份。
+> P1 起新增 SQLite 历史库（`/var/lib/tuiguang/data/history.sqlite`），跟 uploads 一样必须挂卷持久化 + 备份。从 P4 起,所有业务表都加了 `user_id` 列,每个账号的数据完全隔离。
 
 启动 app 容器（**注意：不带 `--profile standalone`，所以容器内 nginx 不启**）：
 ```bash
@@ -100,23 +113,22 @@ docker compose ps
 
 预期：只有 `tuiguang-app` 服务在跑、状态 `running (healthy)`。
 
-验证 app 容器自检：
+验证 app 容器自检 + 首个管理员是否创建:
 ```bash
 curl -fsS http://127.0.0.1:5180/api/health
 # {"ok":true,"service":"huopan-bi-api"}
+docker compose logs app | grep -E '\[auth\]|\[migration\]'
+# 应看到:[auth] 已创建首个管理员: admin (id=1)
+# 升级老库还应看到:[migration] 旧业务表已迁移,所有历史数据归属 user_id=1
 ```
 
-### Step 5 — 生成 Basic Auth 口令文件
+### Step 5 — 收尾 bootstrap 凭据
 
+确认能用 admin 账号登录后(下一步会做完整验证),把 `.env` 里的 `ADMIN_BOOTSTRAP_PASSWORD` 留空或注释掉,然后:
 ```bash
-# 主服务器上
-sudo htpasswd -cBb /etc/nginx/htpasswd-tuiguang admin '替换为强密码'
-sudo htpasswd -Bb  /etc/nginx/htpasswd-tuiguang viewer '另一个强密码'   # 可选追加用户
-sudo chown root:www-data /etc/nginx/htpasswd-tuiguang
-sudo chmod 640 /etc/nginx/htpasswd-tuiguang
+docker compose up -d   # 让进程重新读 env;无密码就不会再尝试 bootstrap
 ```
-
-> 密码 ≥ 12 位含大小写数字符号。`-B` 强制 bcrypt，不要省略。
+密码已经哈希后存进 SQLite,清掉 env 不影响登录;这样后续即使 .env 泄漏也不会暴露明文。
 
 ### Step 6 — 配主 nginx（HTTP only，先把站点拉起来）
 
@@ -138,9 +150,9 @@ sudo systemctl reload nginx
 
 验证 HTTP 通：
 ```bash
-curl -I http://tuiguang.shaozhuangai.com/api/health     # 应 200
-curl -I http://tuiguang.shaozhuangai.com/               # 应 401（要 Basic Auth）
-curl -u admin:'你的密码' http://tuiguang.shaozhuangai.com/   # 应 200，看到 index.html
+curl -I http://tuiguang.shaozhuangai.com/api/health     # 应 200(免鉴权直通)
+curl -I http://tuiguang.shaozhuangai.com/api/product    # 应 401(应用层拦截)
+curl -i http://tuiguang.shaozhuangai.com/               # 应 200,返回登录页 index.html
 ```
 
 ### Step 7 — 申请 Let's Encrypt 证书
@@ -160,17 +172,29 @@ certbot 会自动改 nginx 配置加 SSL 段并 reload。如果你想要更精�
 ### Step 8 — 端到端验证
 
 ```bash
-curl -fsS https://tuiguang.shaozhuangai.com/api/health        # 200
-curl -I    https://tuiguang.shaozhuangai.com/                  # 401
-curl -u admin:'你的密码' https://tuiguang.shaozhuangai.com/    # 200
-curl -I    http://tuiguang.shaozhuangai.com/                   # 301 → https
+curl -fsS https://tuiguang.shaozhuangai.com/api/health        # 200(免鉴权)
+curl -I    https://tuiguang.shaozhuangai.com/api/product      # 401(应用层拦截)
+curl -I    http://tuiguang.shaozhuangai.com/                  # 301 → https
+
+# 应用层登录拿 session cookie:
+curl -c /tmp/sess.txt -X POST https://tuiguang.shaozhuangai.com/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"<你的密码>"}'
+# {"user":{"id":1,"username":"admin",...,"role":"admin",...}}
+
+# 带 cookie 访问应该 200
+curl -fsS -b /tmp/sess.txt https://tuiguang.shaozhuangai.com/api/auth/me
 ```
 
-浏览器访问 `https://tuiguang.shaozhuangai.com/` ：
-- 应弹 Basic Auth 登录窗
-- 登录后看到 BI 主页
-- 进入"源数据"页，应看到时间线面板和"未齐"徽章（首次部署、还没传源表）
-- 上传 5 张生意参谋导出表，徽章变绿/黄，时间线显示对齐情况
+浏览器访问 `https://tuiguang.shaozhuangai.com/`：
+- 跳到登录页 → 用 admin / 你设的密码登录
+- 登录后看到 BI 主页;升级老库的话,旧数据已归到 admin 这个账号
+- 右上角能看到用户名 + admin 角色徽章 + "退出"按钮
+- 左侧导航多一个"管理"项(只有 admin 看得到):
+  - "邀请码"标签:点"生成邀请码",复制注册链接给同事
+  - "用户列表"标签:可禁用/启用账号
+
+新账号开通流程:管理员发邀请码 → 用户打开 `https://tuiguang.shaozhuangai.com/#/register?invite=<码>` → 填用户名/密码 → 自动登录到自己的空数据视图
 
 ---
 
@@ -210,7 +234,9 @@ docker compose up -d --build
 |---|---|
 | `curl tuiguang.../api/health` 返回 502 | app 容器没跑或没绑 5180：`docker compose ps`、`curl 127.0.0.1:5180/api/health` |
 | 浏览器 SSL 报错 | certbot 是否成功执行；`/etc/letsencrypt/live/tuiguang.shaozhuangai.com/` 是否存在 |
-| Basic Auth 弹但密码对的也不通过 | htpasswd 文件没用 `-B`（bcrypt）；重生成；nginx reload |
+| `[startup] DB 初始化失败` "检测到旧版业务数据" | 升级老库时 `ADMIN_BOOTSTRAP_USERNAME/PASSWORD` 没设;设了 env 后 `docker compose up -d` 重启即可 |
+| 管理员账号不存在,登录页提示密码错 | `docker compose logs app \| grep '\[auth\]'`;若看到 "users 表为空" 警告,补 env 后重启 |
+| 登录后立刻又跳回登录页 | cookie 没设进来;检查 nginx 是不是吃掉了 Set-Cookie(本配置不会),浏览器是否禁用了第三方 cookie(同源不该有这问题) |
 | 上传 413 Request Entity Too Large | 主 nginx `client_max_body_size` 没到 100M |
 | 上传卡死 → 504 | 主 nginx `proxy_read_timeout` 不够大 |
 | certbot 拒绝签发 | DNS 没生效（dig 看）或 80 端口没通到主 nginx（`sudo ss -ltnp \| grep :80`） |
@@ -225,11 +251,12 @@ docker compose up -d --build
   │ TLS (Let's Encrypt)
   ▼
 [主服务器 nginx] /etc/nginx/sites-enabled/tuiguang.shaozhuangai.com
-  │ Basic Auth: /etc/nginx/htpasswd-tuiguang
-  │ proxy_pass http://127.0.0.1:5180
+  │ proxy_pass http://127.0.0.1:5180  (无 Basic Auth,应用层接管)
   ▼
 [docker container: tuiguang-app] port 5174
-  │
+  │ 应用层:cookie session + bcrypt + 邀请码注册
+  │ DB:  /app/data/history.sqlite   (users / sessions / invite_codes / 6 张业务表)
+  │ 文件:/app/uploads/source-data/{user_id}/{slot}.{xlsx,csv}
   ▼
-volume mount: /var/lib/tuiguang/uploads
+volume mount: /var/lib/tuiguang/{uploads,data}
 ```

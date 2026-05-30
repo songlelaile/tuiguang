@@ -12,9 +12,9 @@
 | 项 | 主域名子站 | 独立部署 |
 |---|---|---|
 | 启动命令 | `docker compose up -d --build` | `docker compose --profile standalone up -d --build` |
-| 容器内 nginx | 不启用（主服务器 nginx 接管） | 启用 |
+| 容器内 nginx | 不启用（主服务器 nginx 接管） | 启用(仅做反代) |
 | TLS | 主 nginx + certbot Let's Encrypt | 暂不做 |
-| Basic Auth 位置 | `/etc/nginx/htpasswd-tuiguang` | `docker/htpasswd`（容器内） |
+| 鉴权 | **应用层 cookie session + 邀请码注册**(P4+);首个 admin 由 `ADMIN_BOOTSTRAP_*` env 引导 | 同左 |
 | 入口端口 | 主 nginx 443 → loopback 5180 | 容器内 nginx 80 直接对外 |
 
 ## 通用脚本
