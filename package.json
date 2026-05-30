@@ -4,11 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "concurrently -n api,web -c yellow,cyan \"PORT=5174 node server/index.js\" \"vite --host 127.0.0.1\"",
+    "dev": "concurrently -n api,web -c yellow,cyan \"PORT=5174 NODE_OPTIONS=--max-old-space-size=8192 node server/index.js\" \"vite --host 127.0.0.1\"",
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "start": "PORT=5175 node server/index.js",
-    "server": "node server/index.js"
+    "start": "PORT=5175 NODE_OPTIONS=--max-old-space-size=8192 node server/index.js",
+    "server": "NODE_OPTIONS=--max-old-space-size=8192 node server/index.js"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.0.0",

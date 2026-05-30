@@ -12,7 +12,10 @@ export default defineConfig({
     proxy: {
       "/api": {
         target: "http://127.0.0.1:5174",
-        changeOrigin: true
+        changeOrigin: true,
+        // P4.11 大文件上传 + 服务器解析可能 30s+,默认 30s 会 socket hang up
+        timeout: 10 * 60 * 1000,        // 10 分钟
+        proxyTimeout: 10 * 60 * 1000
       }
     }
   },

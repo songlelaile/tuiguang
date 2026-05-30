@@ -253,13 +253,14 @@ async function loadRaw(userId) {
   const cached = rawCacheByUser.get(uid);
   if (cached) return cached;
   const sources = await resolveSourceFiles(uid);
-  const [product, adItem, content, keyword, crowd] = await Promise.all([
-    safeRead(sources.product, readProductWorkbook),
-    safeRead(sources.adItem, readCsv),
-    safeRead(sources.content, readCsv),
-    safeRead(sources.keyword, readCsv),
-    safeRead(sources.crowd, readCsv)
-  ]);
+  // P4.11 顺序读 — 跟之前 Promise.all 比,峰值内存从 ~5×file 降到 ~1×file
+  // 每读完一个,上一个的 Buffer / 解码字符串 / 中间状态都能被 GC 掉
+  // 274 MB 大 CSV 用之前会 OOM,改顺序后只在单文件解析期间峰值最高
+  const product = await safeRead(sources.product, readProductWorkbook);
+  const adItem = await safeRead(sources.adItem, readCsv);
+  const content = await safeRead(sources.content, readCsv);
+  const keyword = await safeRead(sources.keyword, readCsv);
+  const crowd = await safeRead(sources.crowd, readCsv);
   const raw = { product, adItem, content, keyword, crowd };
   rawCacheByUser.set(uid, raw);
   return raw;

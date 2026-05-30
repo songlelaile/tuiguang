@@ -24,6 +24,8 @@ RUN npm run build
 # ---- runtime ----
 FROM node:20-alpine AS runtime
 ENV NODE_ENV=production
+# P4.11 提到 8 GB 容纳大表上传(单个 274 MB CSV + 解析对象易超 2 GB 默认堆)
+ENV NODE_OPTIONS=--max-old-space-size=8192
 WORKDIR /app
 
 # P4.5 apk 同样换镜像;tini + wget 给 HEALTHCHECK 用;
