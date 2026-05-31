@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { parse } from "csv-parse/sync";
+import { parse as parseCsvStream } from "csv-parse"; // 流式:buildMeta 汇总用,不构建整行对象
 import XLSX from "xlsx";
 
 // 多租户:每个 user 的上传文件落在 ROOT_UPLOAD_DIR/{userId}/ 下
@@ -47,8 +48,61 @@ export const sourceUploadSlots = [
   { id: "crowd", name: sourceNames.crowd, defaultFile: "推广人群报表_20260118_130755.csv", uploadFile: "crowd.csv", extensions: [".csv"] }
 ];
 
-// 多租户缓存:key = userId,value = { product, adItem, content, keyword, crowd }
-const rawCacheByUser = new Map();
+// ============ 按表惰性缓存(替代"一次性全载 5 表并永久缓存")============
+// 旧设计:loadRaw 把 5 张源表全量解析后常驻内存(单用户 ~6GB),并发多用户/
+// 每次 /api/meta 都全量载入 → 内存成倍叠加 → OOM。
+// 新设计(不改任何财务聚合口径,只改"怎么载入/驻留"):
+//   1. 按 (user, table) 粒度惰性载入,视图只载它真正用到的表(商品页不再载 crowd/keyword);
+//   2. 在途 Promise 去重,防并发惊群;
+//   3. 总行数预算 LRU 淘汰,硬性封顶常驻内存;
+//   4. 惰性 TTL,空闲数据过期后下次访问重载;
+//   5. 解析并发信号量,封顶瞬时解析峰值(并发多用户时不至于 N 份大文件同时解析撑爆)。
+const RAW_TTL_MS = Number(process.env.RAW_CACHE_TTL_MS || 5 * 60 * 1000);
+const RAW_ROW_BUDGET = Number(process.env.RAW_CACHE_ROW_BUDGET || 1_000_000);
+const RAW_PARSE_CONCURRENCY = Math.max(1, Number(process.env.RAW_PARSE_CONCURRENCY || 2));
+
+const tableCache = new Map(); // `${uid}:${tableId}` -> { rows, count, loadedAt, lastAccess }
+const tableLoading = new Map(); // `${uid}:${tableId}` -> Promise<rows>
+const summaryCache = new Map(); // uid -> Map(tableId -> { sig, summary })  buildMeta 用的轻量汇总
+
+const ALL_TABLE_IDS = ["product", "adItem", "content", "keyword", "crowd"];
+
+// 解析信号量:最多 RAW_PARSE_CONCURRENCY 个文件同时解析,其余排队
+let parseActive = 0;
+const parseQueue = [];
+function acquireParseSlot() {
+  if (parseActive < RAW_PARSE_CONCURRENCY) {
+    parseActive++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => parseQueue.push(resolve));
+}
+function releaseParseSlot() {
+  parseActive = Math.max(0, parseActive - 1);
+  const next = parseQueue.shift();
+  if (next) {
+    parseActive++;
+    next();
+  }
+}
+
+function totalCachedRows() {
+  let total = 0;
+  for (const entry of tableCache.values()) total += entry.count;
+  return total;
+}
+
+// 预算超限时按 lastAccess 最旧优先淘汰(保护刚插入的 protectKey)
+function evictRawToBudget(protectKey) {
+  if (totalCachedRows() <= RAW_ROW_BUDGET) return;
+  const victims = [...tableCache.entries()]
+    .filter(([key]) => key !== protectKey)
+    .sort((a, b) => a[1].lastAccess - b[1].lastAccess);
+  for (const [key] of victims) {
+    if (totalCachedRows() <= RAW_ROW_BUDGET) break;
+    tableCache.delete(key);
+  }
+}
 
 async function fileExists(filePath) {
   try {
@@ -75,10 +129,16 @@ export function getUploadedSourcePath(userId, sourceId) {
 
 export function resetRawCache(userId) {
   if (userId === undefined) {
-    rawCacheByUser.clear();
-  } else {
-    rawCacheByUser.delete(requireUserId(userId));
+    tableCache.clear();
+    tableLoading.clear();
+    summaryCache.clear();
+    return;
   }
+  const uid = requireUserId(userId);
+  const prefix = `${uid}:`;
+  for (const key of tableCache.keys()) if (key.startsWith(prefix)) tableCache.delete(key);
+  for (const key of tableLoading.keys()) if (key.startsWith(prefix)) tableLoading.delete(key);
+  summaryCache.delete(uid);
 }
 
 export async function clearSourceData(userId) {
@@ -194,19 +254,19 @@ function textMatch(text, q) {
 async function readCsv(filePath) {
   const buffer = await fs.readFile(filePath);
   const text = new TextDecoder("gb18030").decode(buffer);
-  const rows = parse(text, {
+  // P4.12 用 cast 在解析期就地转换金额字段,取代解析后再 rows.map() 复制一遍。
+  // 大文件(crowd.csv 70 万行 × 75 列)那次 .map() 会瞬时再分配一份等大数组,
+  // 正是 OOM 栈里的 Builtins_ArrayMap。就地转换把单文件峰值再砍掉约一份拷贝。
+  return parse(text, {
     columns: true,
     bom: true,
     skip_empty_lines: true,
     relax_column_count: true,
-    trim: true
-  });
-  return rows.map((row) => {
-    const out = {};
-    for (const [key, value] of Object.entries(row)) {
-      out[key] = moneyFields.has(key) ? cleanNumber(value) : value;
+    trim: true,
+    cast: (value, context) => {
+      if (context.header) return value; // 表头原样,只转数据格
+      return moneyFields.has(context.column) ? cleanNumber(value) : value;
     }
-    return out;
   });
 }
 
@@ -243,27 +303,173 @@ async function safeRead(source, reader) {
   return reader(source.file);
 }
 
-// P1.2 暴露 raw 数据快照给历史库入库流程
-export async function getRawSnapshot(userId) {
-  return loadRaw(userId);
+const tableReaders = {
+  product: readProductWorkbook,
+  adItem: readCsv,
+  content: readCsv,
+  keyword: readCsv,
+  crowd: readCsv
+};
+
+// 惰性载入单张表:命中缓存(未过期)直接返回;否则解析,带在途去重 + 解析信号量 + 预算淘汰
+async function loadTable(userId, tableId) {
+  const uid = requireUserId(userId);
+  const key = `${uid}:${tableId}`;
+  const cached = tableCache.get(key);
+  if (cached) {
+    if (Date.now() - cached.loadedAt <= RAW_TTL_MS) {
+      cached.lastAccess = Date.now();
+      return cached.rows;
+    }
+    tableCache.delete(key); // 过期,重载
+  }
+  const inflight = tableLoading.get(key);
+  if (inflight) return inflight;
+
+  const promise = (async () => {
+    const sources = await resolveSourceFiles(uid);
+    await acquireParseSlot();
+    let rows;
+    try {
+      rows = await safeRead(sources[tableId], tableReaders[tableId]);
+    } finally {
+      releaseParseSlot();
+    }
+    const now = Date.now();
+    tableCache.set(key, { rows, count: rows.length, loadedAt: now, lastAccess: now });
+    evictRawToBudget(key);
+    return rows;
+  })();
+  tableLoading.set(key, promise);
+  try {
+    return await promise;
+  } finally {
+    tableLoading.delete(key);
+  }
 }
 
-async function loadRaw(userId) {
-  const uid = requireUserId(userId);
-  const cached = rawCacheByUser.get(uid);
-  if (cached) return cached;
-  const sources = await resolveSourceFiles(uid);
-  // P4.11 顺序读 — 跟之前 Promise.all 比,峰值内存从 ~5×file 降到 ~1×file
-  // 每读完一个,上一个的 Buffer / 解码字符串 / 中间状态都能被 GC 掉
-  // 274 MB 大 CSV 用之前会 OOM,改顺序后只在单文件解析期间峰值最高
-  const product = await safeRead(sources.product, readProductWorkbook);
-  const adItem = await safeRead(sources.adItem, readCsv);
-  const content = await safeRead(sources.content, readCsv);
-  const keyword = await safeRead(sources.keyword, readCsv);
-  const crowd = await safeRead(sources.crowd, readCsv);
-  const raw = { product, adItem, content, keyword, crowd };
-  rawCacheByUser.set(uid, raw);
-  return raw;
+// 按需载入一组表,返回 { [id]: rows }(只载入 ids 指定的表)
+async function loadTables(userId, ids) {
+  const pairs = await Promise.all(ids.map(async (id) => [id, await loadTable(userId, id)]));
+  return Object.fromEntries(pairs);
+}
+
+// P1.2 暴露 raw 数据快照给历史库入库流程(入库需要全部 5 张表)
+export async function getRawSnapshot(userId) {
+  return loadTables(userId, ALL_TABLE_IDS);
+}
+
+// ============ buildMeta 用的轻量汇总 ============
+// buildMeta 只需要每表的「行数 / 日期范围 / 去重场景」,不需要财务列。
+// 流式扫描只取 date + 场景名字 两列,内存 O(去重场景数);按文件签名(mtime+size)缓存,
+// 文件没变就直接复用,避免每次 /api/meta 都重扫 463MB。
+async function fileSignature(filePath) {
+  try {
+    const st = await fs.stat(filePath);
+    return `${st.mtimeMs}:${st.size}`;
+  } catch {
+    return "";
+  }
+}
+
+// 流式汇总 CSV:columns:false 只按列下标取 date/scene,不构建 75 列对象 → 快且省内存
+async function summarizeCsv(filePath, dateField, sceneField) {
+  const buffer = await fs.readFile(filePath);
+  const text = new TextDecoder("gb18030").decode(buffer);
+  return await new Promise((resolve, reject) => {
+    let count = 0;
+    let start = "";
+    let end = "";
+    let dateIdx = -1;
+    let sceneIdx = -1;
+    let headerSeen = false;
+    const scenes = new Set();
+    const parser = parseCsvStream(text, {
+      columns: false,
+      bom: true,
+      skip_empty_lines: true,
+      relax_column_count: true,
+      trim: true
+    });
+    parser.on("readable", () => {
+      let rec;
+      while ((rec = parser.read()) !== null) {
+        if (!headerSeen) {
+          headerSeen = true;
+          dateIdx = rec.indexOf(dateField);
+          sceneIdx = sceneField ? rec.indexOf(sceneField) : -1;
+          continue;
+        }
+        count++;
+        if (dateIdx >= 0) {
+          const d = parseDateText(rec[dateIdx]);
+          if (d) {
+            if (!start || d < start) start = d;
+            if (!end || d > end) end = d;
+          }
+        }
+        if (sceneIdx >= 0) {
+          const s = rec[sceneIdx];
+          if (s) scenes.add(s);
+        }
+      }
+    });
+    parser.on("error", reject);
+    parser.on("end", () => resolve({ count, start, end, scenes: [...scenes].sort() }));
+  });
+}
+
+// product 是 xlsx 且体积小(~27K 行),直接全量解析后汇总即弃;无场景列
+async function summarizeWorkbook(filePath) {
+  const rows = await readProductWorkbook(filePath);
+  let start = "";
+  let end = "";
+  for (const row of rows) {
+    const d = parseDateText(row["统计日期"]);
+    if (d) {
+      if (!start || d < start) start = d;
+      if (!end || d > end) end = d;
+    }
+  }
+  return { count: rows.length, start, end, scenes: [] };
+}
+
+const EMPTY_SUMMARY = { count: 0, start: "", end: "", scenes: [] };
+
+async function getSummaries(uid, sources) {
+  let perUser = summaryCache.get(uid);
+  if (!perUser) {
+    perUser = new Map();
+    summaryCache.set(uid, perUser);
+  }
+  const out = {};
+  for (const id of ALL_TABLE_IDS) {
+    const source = sources[id];
+    if (source.cleared || !source.file) {
+      out[id] = EMPTY_SUMMARY;
+      continue;
+    }
+    const sig = await fileSignature(source.file);
+    const hit = perUser.get(id);
+    if (hit && hit.sig === sig) {
+      out[id] = hit.summary;
+      continue;
+    }
+    // 汇总扫描同样走解析信号量,封顶并发首次加载时的瞬时内存峰值
+    await acquireParseSlot();
+    let summary;
+    try {
+      summary =
+        id === "product"
+          ? await summarizeWorkbook(source.file)
+          : await summarizeCsv(source.file, sourceDateFields[id], "场景名字");
+    } finally {
+      releaseParseSlot();
+    }
+    perUser.set(id, { sig, summary });
+    out[id] = summary;
+  }
+  return out;
 }
 
 function addToGroup(map, key, initial, merge) {
@@ -542,49 +748,46 @@ export function computeAlignment(perTable) {
 export async function buildMeta(userId) {
   const uid = requireUserId(userId);
   const sources = await resolveSourceFiles(uid);
-  const raw = await loadRaw(uid);
-  const uniqueScenes = (rows) => [...new Set(rows.map((row) => row["场景名字"]).filter(Boolean))].sort();
-  const sourceMeta = (id, rows, dateField) => ({
+  // 轻量汇总(行数 / 日期范围 / 去重场景),不再全量载入 5 张表
+  const summaries = await getSummaries(uid, sources);
+  const sourceMeta = (id) => ({
     id,
     name: sourceNames[id],
     file: sources[id].file || "已清空源数据",
     uploaded: sources[id].uploaded,
     mode: sources[id].mode,
     cleared: sources[id].cleared,
-    rows: rows.length,
-    dateField,
-    ...dateRange(rows, dateField)
+    rows: summaries[id].count,
+    dateField: sourceDateFields[id],
+    start: summaries[id].start,
+    end: summaries[id].end
   });
-  const sourceList = [
-    sourceMeta("product", raw.product, sourceDateFields.product),
-    sourceMeta("adItem", raw.adItem, sourceDateFields.adItem),
-    sourceMeta("content", raw.content, sourceDateFields.content),
-    sourceMeta("keyword", raw.keyword, sourceDateFields.keyword),
-    sourceMeta("crowd", raw.crowd, sourceDateFields.crowd)
-  ];
+  const sourceList = ALL_TABLE_IDS.map(sourceMeta);
   const alignment = computeAlignment(
     Object.fromEntries(sourceList.map((item) => [item.id, { start: item.start, end: item.end }]))
   );
+  // 跨表场景去重 = 各表去重场景的并集再排序(等价于原来对拼接行去重)
+  const unionScenes = (ids) => [...new Set(ids.flatMap((id) => summaries[id].scenes))].sort();
   return {
     dataDir: ROOT_DATA_DIR,
     uploadDir: userUploadDir(uid),
     sourceDataCleared: Object.values(sources).every((source) => source.cleared),
     sources: sourceList,
     alignment,
-    scenes: uniqueScenes([...raw.adItem, ...raw.content, ...raw.keyword, ...raw.crowd]),
+    scenes: unionScenes(["adItem", "content", "keyword", "crowd"]),
     scenesByView: {
       product: [],
-      "ad-products": uniqueScenes([...raw.adItem, ...raw.content]),
-      keywords: uniqueScenes(raw.keyword),
-      crowds: uniqueScenes(raw.crowd),
-      contents: uniqueScenes(raw.content),
+      "ad-products": unionScenes(["adItem", "content"]),
+      keywords: unionScenes(["keyword"]),
+      crowds: unionScenes(["crowd"]),
+      contents: unionScenes(["content"]),
       sources: []
     }
   };
 }
 
 export async function buildProductView(userId, range = {}) {
-  const { product, adItem, content } = await loadRaw(userId);
+  const { product, adItem, content } = await loadTables(userId, ["product", "adItem", "content"]);
   const rows = filterRows(product, range, "统计日期", ["商品名称", "商品标题", "商品ID"]);
 
   // 全店推广花费：从推广商品报表 + 推广内容报表的"花费"按日期聚合
@@ -842,7 +1045,7 @@ function buildAdSubject(rows) {
 const adFields = ["花费", "总成交金额", "展现量", "点击量", "总成交笔数", "间接成交笔数", "总购物车数", "引导访问潜客数", "引导访问人数"];
 
 export async function buildAdProductsView(userId, range = {}) {
-  const raw = await loadRaw(userId);
+  const raw = await loadTables(userId, ["adItem", "content"]);
   const rows = filterRows(adUnion(raw), range, "日期", ["主体名称", "计划名字", "场景名字"]);
   const subjects = buildAdSubject(rows);
 
@@ -909,7 +1112,7 @@ export async function buildAdProductsView(userId, range = {}) {
 }
 
 export async function buildKeywordView(userId, range = {}) {
-  const raw = await loadRaw(userId);
+  const raw = await loadTables(userId, ["keyword"]);
   const rows = filterRows(raw.keyword, range, "日期", ["词名字/词包名字", "宝贝名称", "计划名字"]);
   const groups = new Map();
   const wordGroups = new Map();
@@ -968,7 +1171,7 @@ export async function buildKeywordView(userId, range = {}) {
 }
 
 export async function buildCrowdView(userId, range = {}) {
-  const raw = await loadRaw(userId);
+  const raw = await loadTables(userId, ["crowd"]);
   const rows = filterRows(raw.crowd, range, "日期", ["人群名字", "主体名称", "单元名字", "场景名字"]);
   const groups = new Map();
   const sceneWords = new Map();
@@ -1020,7 +1223,7 @@ export async function buildCrowdView(userId, range = {}) {
 }
 
 export async function buildContentView(userId, range = {}) {
-  const raw = await loadRaw(userId);
+  const raw = await loadTables(userId, ["content"]);
   const rows = filterRows(raw.content, range, "日期", ["主体名称", "计划名字", "主体类型"]);
   const groups = new Map();
   for (const row of rows) {

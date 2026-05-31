@@ -61,6 +61,26 @@ const rootDir = path.resolve(__dirname, "..");
 // 上传临时目录使用根级 _tmp(与 user 无关,文件落地前不知道是谁的)
 const uploadTmpDir = path.join(getRootUploadDir(), "_tmp");
 
+// 崩溃 / 异常落盘:进程级未捕获错误 + 每个 500 都追加到 logs/server-error.log
+// 背景:API 进程曾"无声死亡"且 concurrently 不重启,前端只剩
+//   "Failed to execute 'json' ...: Unexpected end of JSON input"
+// 排查时没有任何栈。落盘后下次崩溃可直接 tail logs/server-error.log 定位。
+const crashLogDir = path.join(rootDir, "logs");
+const crashLogFile = path.join(crashLogDir, "server-error.log");
+function logCrash(context, error) {
+  const stamp = new Date().toISOString();
+  const detail = error instanceof Error ? error.stack || error.message : String(error);
+  const line = `\n[${stamp}] ${context}\n${detail}\n`;
+  // 同步写:即使紧接着进程退出也要确保栈落地
+  try {
+    fsSync.mkdirSync(crashLogDir, { recursive: true });
+    fsSync.appendFileSync(crashLogFile, line);
+  } catch (writeErr) {
+    console.error("[crashlog] 写入失败:", writeErr.message);
+  }
+  console.error(`[${context}]`, detail);
+}
+
 // auth 中间件 + 业务路由共用 history.js 的同一个 SQLite 连接
 const getDb = getDbHandle;
 
@@ -532,8 +552,8 @@ app.use((req, res, next) => {
   res.sendFile(path.join(rootDir, "dist", "index.html"));
 });
 
-app.use((error, _req, res, _next) => {
-  console.error(error);
+app.use((error, req, res, _next) => {
+  logCrash(`request-error ${req.method} ${req.originalUrl}`, error);
   // P4.10 把 multer "File too large" 翻译成中文 + 告诉用户上限
   if (error?.code === "LIMIT_FILE_SIZE") {
     return res.status(413).json({
@@ -584,6 +604,41 @@ const sessionPruneTimer = setInterval(() => {
 sessionPruneTimer.unref(); // 不阻塞进程退出
 process.on("SIGTERM", () => clearInterval(sessionPruneTimer));
 process.on("SIGINT", () => clearInterval(sessionPruneTimer));
+
+// OOM 早期预警:V8 fatal OOM(源表过大、全量载入内存)会直接 SIGABRT,
+// uncaughtException 捕获不到。这里定时采样堆用量,逼近上限时往 crash log 写一条
+// 面包屑,至少让"无声死亡"留下"临死前堆已爆"的线索。注意:若 OOM 发生在单次
+// 同步 parse() 内部,事件循环被占满、采样来不及触发,这是已知局限。
+const heapLimitMb = (() => {
+  const m = /max-old-space-size=(\d+)/.exec(process.env.NODE_OPTIONS || "");
+  return m ? Number(m[1]) : 0;
+})();
+let heapWarned = false;
+const heapWatchTimer = setInterval(() => {
+  if (!heapLimitMb) return;
+  const usedMb = process.memoryUsage().heapUsed / 1024 / 1024;
+  if (usedMb > heapLimitMb * 0.85) {
+    if (!heapWarned) {
+      heapWarned = true;
+      logCrash(
+        "heap-high-water",
+        new Error(`堆用量 ${usedMb.toFixed(0)}MB 已超过上限 ${heapLimitMb}MB 的 85%,可能即将 OOM(多半是源表过大、全量载入内存)`)
+      );
+    }
+  } else {
+    heapWarned = false; // 回落后允许再次预警
+  }
+}, 2000);
+heapWatchTimer.unref(); // 不阻塞进程退出
+process.on("SIGTERM", () => clearInterval(heapWatchTimer));
+process.on("SIGINT", () => clearInterval(heapWatchTimer));
+
+// 进程级兜底:未捕获异常 / 未处理的 Promise rejection → 落盘并保活。
+// uncaughtException 后进程状态理论上不可靠,但对内部 BI 工具而言,
+// "带着可能降级的状态继续服务" 远好于 "后端无声消失、前端只剩 JSON 解析报错"。
+// 真正的崩因可在 logs/server-error.log 里看到栈,再决定是否需要重启。
+process.on("uncaughtException", (error) => logCrash("uncaughtException", error));
+process.on("unhandledRejection", (reason) => logCrash("unhandledRejection", reason));
 
 app.listen(port, host, () => {
   console.log(`huopan-bi-api listening on http://${host}:${port}`);

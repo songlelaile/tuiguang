@@ -7,6 +7,7 @@ import { DataTable, type ColumnDef } from "./ui/DataTable";
 import { MetricCard } from "./ui/MetricCard";
 import { WeeklyMatrix, type WeeklyMetric } from "./ui/WeeklyMatrix";
 import { fmtInt, fmtMoney, fmtNumber, fmtPercent } from "./utils/format";
+import { readApiError } from "./lib/api";
 
 // P4.6 账号系统拆出来,单独 chunk
 //   - LoginView / RegisterView 跟着主 bundle(未登录用户首屏就要)
@@ -351,7 +352,9 @@ function useApi<T>(active: ViewKey, filters: Filters) {
     setData(null);
     fetch(`${endpoint}${buildQuery(filters)}`)
       .then(async (res) => {
-        if (!res.ok) throw new Error((await res.json()).error || res.statusText);
+        // readApiError 兜底空 body 的 5xx,避免直接 res.json() 抛
+        // "Unexpected end of JSON input"(后端进程挂掉时代理回的空 500)
+        if (!res.ok) throw new Error(await readApiError(res));
         return res.json();
       })
       .then((json) => {
@@ -410,7 +413,7 @@ function App({ auth }: { auth: AuthState }) {
 
   React.useEffect(() => {
     fetch("/api/meta", { credentials: "include" })
-      .then((res) => res.json())
+      .then((res) => (res.ok ? res.json() : null))
       .then(setMeta)
       .catch(() => setMeta(null));
   }, []);
