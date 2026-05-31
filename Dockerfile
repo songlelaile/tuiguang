@@ -2,10 +2,17 @@
 # P4.5 syntax 升到 1.7,启用 --mount=type=cache
 
 # ---- build dist ----
-FROM node:20-alpine AS builder
+# P4.12.1 Node 升到 22:better-sqlite3 v12 对 Node 20(ABI 115)没有预编译二进制,
+# 只能现场编译 sqlite3.c —— 那一步在小内存机(2C4G)会 OOM/卡死整台服务器。
+# Node 22(ABI 127)有 musl 预编译;配合下面的 binary_host_mirror 直接下二进制,不再编译。
+FROM node:22-alpine AS builder
 WORKDIR /app
 
+# 让 better-sqlite3 从 npmmirror 取预编译二进制(国内快),装不到才回退编译
+ENV npm_config_better_sqlite3_binary_host_mirror=https://registry.npmmirror.com/-/binary/better-sqlite3
+
 # P4.5 apk 换阿里云镜像,国内构建 apk add 提速 10-30 倍
+#（make/g++/python3 仅作"取不到预编译时回退编译"的兜底)
 RUN sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories \
  && apk add --no-cache python3 make g++
 
@@ -22,10 +29,12 @@ COPY . .
 RUN npm run build
 
 # ---- runtime ----
-FROM node:20-alpine AS runtime
+FROM node:22-alpine AS runtime
 ENV NODE_ENV=production
 # P4.11 提到 8 GB 容纳大表上传(单个 274 MB CSV + 解析对象易超 2 GB 默认堆)
 ENV NODE_OPTIONS=--max-old-space-size=8192
+# P4.12.1 同样走预编译二进制,runtime 的 npm ci 不再编译 better-sqlite3
+ENV npm_config_better_sqlite3_binary_host_mirror=https://registry.npmmirror.com/-/binary/better-sqlite3
 WORKDIR /app
 
 # P4.5 apk 同样换镜像;tini + wget 给 HEALTHCHECK 用;
