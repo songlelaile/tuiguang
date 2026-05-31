@@ -16,6 +16,14 @@ services:
       HUOPAN_HISTORY_DB: /app/data/history.sqlite
       UPLOAD_MAX_MB: ${UPLOAD_MAX_MB:-500}
       TZ: ${TZ:-Asia/Shanghai}
+      # P4.13 扩容(默认单进程/单份缓存,小内存机安全)。多核服务器再调高,
+      # 注意总内存 ≈ WEB_CONCURRENCY ×(RAW_CACHE_ROW_BUDGET 对应内存 + RESULT_CACHE_MAX_MB + ~0.5G)。
+      # 8 核 16G 推荐:WEB_CONCURRENCY=4,RESULT_CACHE_MAX_MB=256,并在 .env 设 NODE_OPTIONS 降单 worker 堆。
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-1}
+      RAW_CACHE_ROW_BUDGET: ${RAW_CACHE_ROW_BUDGET:-1000000}
+      RESULT_CACHE_MAX_MB: ${RESULT_CACHE_MAX_MB:-512}
+      # 单 worker 的 V8 堆上限;集群时按 内存/worker 数 调低(默认走 Dockerfile 的 8192)
+      NODE_OPTIONS: ${NODE_OPTIONS:---max-old-space-size=8192}
       # 账号系统(P4):首次部署引导首个管理员;创建后建议把密码从 .env 撤掉
       ADMIN_BOOTSTRAP_USERNAME: ${ADMIN_BOOTSTRAP_USERNAME:-}
       ADMIN_BOOTSTRAP_PASSWORD: ${ADMIN_BOOTSTRAP_PASSWORD:-}

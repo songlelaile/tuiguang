@@ -6,6 +6,7 @@ import * as fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import cluster from "node:cluster";
 import multer from "multer";
 import XLSX from "xlsx";
 import {
@@ -567,79 +568,104 @@ app.use((error, req, res, _next) => {
 
 // ---- 启动 ----
 
-try {
-  // 同步触发完整 DB init:auth 表 + bootstrap admin + 老数据迁移 + 业务 schema
-  initDatabase();
-} catch (e) {
-  console.error("[startup] DB 初始化失败,无法启动:", e.message);
-  process.exit(1);
+// 启动一个 HTTP 服务进程:单进程模式由主进程调用,集群模式由各 worker 调用。
+// 每个真正服务请求的进程都装上 OOM 堆预警 + 进程级异常兜底。
+function startServer() {
+  // OOM 早期预警:V8 fatal OOM 会直接 SIGABRT,uncaughtException 捕获不到。
+  // 定时采样堆用量,逼近上限时往 crash log 写面包屑。(同步 parse 内部爆掉时采样
+  // 来不及触发,是已知局限。)
+  const heapLimitMb = (() => {
+    const m = /max-old-space-size=(\d+)/.exec(process.env.NODE_OPTIONS || "");
+    return m ? Number(m[1]) : 0;
+  })();
+  let heapWarned = false;
+  const heapWatchTimer = setInterval(() => {
+    if (!heapLimitMb) return;
+    const usedMb = process.memoryUsage().heapUsed / 1024 / 1024;
+    if (usedMb > heapLimitMb * 0.85) {
+      if (!heapWarned) {
+        heapWarned = true;
+        logCrash(
+          "heap-high-water",
+          new Error(`堆用量 ${usedMb.toFixed(0)}MB 已超过上限 ${heapLimitMb}MB 的 85%,可能即将 OOM`)
+        );
+      }
+    } else {
+      heapWarned = false;
+    }
+  }, 2000);
+  heapWatchTimer.unref();
+
+  // 进程级兜底:未捕获异常 / 未处理 rejection → 落盘并保活(内部 BI 工具,降级服务好过无声消失)
+  process.on("uncaughtException", (error) => logCrash("uncaughtException", error));
+  process.on("unhandledRejection", (reason) => logCrash("unhandledRejection", reason));
+
+  app.listen(port, host, () => {
+    const tag = cluster.isWorker ? `worker pid=${process.pid}` : "单进程";
+    console.log(`huopan-bi-api listening on http://${host}:${port} (${tag})`);
+  });
 }
 
-// 把旧版 uploads/source-data/*.{xlsx,csv} 裸文件归到 first admin(幂等)
-try {
-  const adminId = getFirstAdminId();
-  if (adminId) migrateLegacyUploadFiles(getRootUploadDir(), adminId);
-} catch (e) {
-  console.error("[migration] 上传文件迁移失败(已忽略):", e.message);
-}
+// P4.13 多进程:WEB_CONCURRENCY>1 时主进程 fork 多个 worker 吃满多核;默认 1 = 单进程(原行为)。
+// ⚠️ 每个 worker 各持一份内存缓存,总内存 ≈ worker 数 × 单进程内存,需按服务器内存设 WEB_CONCURRENCY
+//    和 RAW_CACHE_ROW_BUDGET / RESULT_CACHE_MAX_MB(见 deploy 文档)。
+// 主进程只做一次:DB 初始化(避免多进程 bootstrap 竞争)+ 迁移 + session 定时清理。
+const workerCount = (() => {
+  const env = Number(process.env.WEB_CONCURRENCY);
+  return Number.isFinite(env) && env >= 1 ? Math.floor(env) : 1;
+})();
 
-// 启动时清一次
-try {
-  const removed = pruneExpiredSessions(getDb());
-  if (removed > 0) console.log(`[auth] 启动时清理 ${removed} 条过期 session`);
-} catch (e) {
-  console.error("[auth] session 清理失败:", e.message);
-}
+if (cluster.isPrimary) {
+  try {
+    // 同步触发完整 DB init:auth 表 + bootstrap admin + 老数据迁移 + 业务 schema
+    initDatabase();
+  } catch (e) {
+    console.error("[startup] DB 初始化失败,无法启动:", e.message);
+    process.exit(1);
+  }
 
-// P4.5 sessions 表长期会无限增长,定时清过期(默认 1 小时一次)
-const SESSION_PRUNE_INTERVAL_MS = Number(process.env.SESSION_PRUNE_INTERVAL_MS || 60 * 60 * 1000);
-const sessionPruneTimer = setInterval(() => {
+  // 把旧版 uploads/source-data/*.{xlsx,csv} 裸文件归到 first admin(幂等)
+  try {
+    const adminId = getFirstAdminId();
+    if (adminId) migrateLegacyUploadFiles(getRootUploadDir(), adminId);
+  } catch (e) {
+    console.error("[migration] 上传文件迁移失败(已忽略):", e.message);
+  }
+
+  // 启动时清一次过期 session
   try {
     const removed = pruneExpiredSessions(getDb());
-    if (removed > 0) console.log(`[auth] 定时清理 ${removed} 条过期 session`);
+    if (removed > 0) console.log(`[auth] 启动时清理 ${removed} 条过期 session`);
   } catch (e) {
-    console.error("[auth] 定时 session 清理失败:", e.message);
+    console.error("[auth] session 清理失败:", e.message);
   }
-}, SESSION_PRUNE_INTERVAL_MS);
-sessionPruneTimer.unref(); // 不阻塞进程退出
-process.on("SIGTERM", () => clearInterval(sessionPruneTimer));
-process.on("SIGINT", () => clearInterval(sessionPruneTimer));
 
-// OOM 早期预警:V8 fatal OOM(源表过大、全量载入内存)会直接 SIGABRT,
-// uncaughtException 捕获不到。这里定时采样堆用量,逼近上限时往 crash log 写一条
-// 面包屑,至少让"无声死亡"留下"临死前堆已爆"的线索。注意:若 OOM 发生在单次
-// 同步 parse() 内部,事件循环被占满、采样来不及触发,这是已知局限。
-const heapLimitMb = (() => {
-  const m = /max-old-space-size=(\d+)/.exec(process.env.NODE_OPTIONS || "");
-  return m ? Number(m[1]) : 0;
-})();
-let heapWarned = false;
-const heapWatchTimer = setInterval(() => {
-  if (!heapLimitMb) return;
-  const usedMb = process.memoryUsage().heapUsed / 1024 / 1024;
-  if (usedMb > heapLimitMb * 0.85) {
-    if (!heapWarned) {
-      heapWarned = true;
-      logCrash(
-        "heap-high-water",
-        new Error(`堆用量 ${usedMb.toFixed(0)}MB 已超过上限 ${heapLimitMb}MB 的 85%,可能即将 OOM(多半是源表过大、全量载入内存)`)
-      );
+  // P4.5 sessions 表定时清过期(只在主进程跑,避免多 worker 重复写)
+  const SESSION_PRUNE_INTERVAL_MS = Number(process.env.SESSION_PRUNE_INTERVAL_MS || 60 * 60 * 1000);
+  const sessionPruneTimer = setInterval(() => {
+    try {
+      const removed = pruneExpiredSessions(getDb());
+      if (removed > 0) console.log(`[auth] 定时清理 ${removed} 条过期 session`);
+    } catch (e) {
+      console.error("[auth] 定时 session 清理失败:", e.message);
     }
+  }, SESSION_PRUNE_INTERVAL_MS);
+  sessionPruneTimer.unref();
+  process.on("SIGTERM", () => clearInterval(sessionPruneTimer));
+  process.on("SIGINT", () => clearInterval(sessionPruneTimer));
+
+  if (workerCount > 1) {
+    console.log(`[cluster] 主进程 ${process.pid} 启动 ${workerCount} 个 worker(各持独立内存缓存)`);
+    for (let i = 0; i < workerCount; i++) cluster.fork();
+    cluster.on("exit", (worker, code, signal) => {
+      console.error(`[cluster] worker ${worker.process.pid} 退出(${signal || code}),自动重启一个`);
+      cluster.fork();
+    });
   } else {
-    heapWarned = false; // 回落后允许再次预警
+    // 单进程模式:主进程自己服务(DB 已在上面初始化好)
+    startServer();
   }
-}, 2000);
-heapWatchTimer.unref(); // 不阻塞进程退出
-process.on("SIGTERM", () => clearInterval(heapWatchTimer));
-process.on("SIGINT", () => clearInterval(heapWatchTimer));
-
-// 进程级兜底:未捕获异常 / 未处理的 Promise rejection → 落盘并保活。
-// uncaughtException 后进程状态理论上不可靠,但对内部 BI 工具而言,
-// "带着可能降级的状态继续服务" 远好于 "后端无声消失、前端只剩 JSON 解析报错"。
-// 真正的崩因可在 logs/server-error.log 里看到栈,再决定是否需要重启。
-process.on("uncaughtException", (error) => logCrash("uncaughtException", error));
-process.on("unhandledRejection", (reason) => logCrash("unhandledRejection", reason));
-
-app.listen(port, host, () => {
-  console.log(`huopan-bi-api listening on http://${host}:${port}`);
-});
+} else {
+  // worker:DB schema 已由主进程建好;WAL 支持多进程连接,首次 getDb() 自开本进程连接
+  startServer();
+}

@@ -209,6 +209,33 @@ docker compose ps
 
 主 nginx 配置不需要重启。Let's Encrypt 证书 certbot 自带 systemd timer 自动续签，无需手动。
 
+## 扩容（P4.13：结果缓存 + 多进程）
+
+P4.13 起：
+- **结果缓存**默认开启 —— 同一用户、同筛选的视图重复请求直接命中（~0ms），上传后自动失效。无需配置。
+- **多进程**默认**关闭**（单进程，和以前一样，小内存机安全）。多核服务器才开。
+
+⚠️ 关键：每个 worker 各持**一份独立内存缓存**，所以
+**总内存 ≈ `WEB_CONCURRENCY` ×（单 worker 缓存 + V8 堆 + ~0.5G）**。开多进程必须同步调小单 worker 的堆和缓存,否则内存翻倍 → OOM。
+
+在 `.env` 里按服务器配置设置（改完 `docker compose up -d` 重启即可，**不用 --build**）：
+
+| 服务器 | `.env` 配置 |
+|---|---|
+| **2 核 4G**（默认,够当前测试量） | 全部留空（单进程,8G 堆默认值其实偏大,可加 `NODE_OPTIONS=--max-old-space-size=3072`) |
+| **4 核 8G** | `WEB_CONCURRENCY=2`<br>`NODE_OPTIONS=--max-old-space-size=3072`<br>`RESULT_CACHE_MAX_MB=256` |
+| **8 核 16G**（~50 并发推荐） | `WEB_CONCURRENCY=4`<br>`NODE_OPTIONS=--max-old-space-size=3072`<br>`RESULT_CACHE_MAX_MB=256`<br>`RAW_CACHE_ROW_BUDGET=900000` |
+
+```bash
+cd /opt/tuiguang
+nano .env        # 加上上表对应几行
+docker compose up -d         # 重启读新 env(无需重新 build)
+docker compose logs app | grep -E '\[cluster\]|listening'   # 应看到 "启动 N 个 worker" + N 行 listening
+```
+
+验证多核生效:`docker stats` 看 CPU 能上到 >100%(多核);压测重页面时多个 worker 分担。
+回退单进程:把 `WEB_CONCURRENCY` 删掉或设 1,`docker compose up -d`。
+
 ## 备份 uploads + 历史库
 
 ```bash

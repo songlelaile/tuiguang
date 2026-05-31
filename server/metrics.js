@@ -104,6 +104,70 @@ function evictRawToBudget(protectKey) {
   }
 }
 
+// ============ 结果缓存(缓存视图聚合产物,而非原始行)============
+// 重页面(人群/关键词)每次请求都要重算几十万行(~2s+),重复浏览很浪费。
+// 按 (用户, 视图, 筛选参数, 源文件签名) 缓存聚合结果:同参数重复请求直接命中(~0ms);
+// 源文件一变(上传)签名就变 → 旧 key 自然失效。按总字节 LRU 封顶,内存可控。
+const RESULT_CACHE_MAX_MB = Number(process.env.RESULT_CACHE_MAX_MB || 512);
+const resultCache = new Map(); // key -> { value, bytes, lastAccess }
+let resultBytes = 0;
+
+async function tablesSignature(uid, ids) {
+  const sources = await resolveSourceFiles(uid);
+  const parts = await Promise.all(
+    ids.map((id) => {
+      const s = sources[id];
+      return s.cleared || !s.file ? Promise.resolve("∅") : fileSignature(s.file);
+    })
+  );
+  return parts.join("|");
+}
+
+// 包住一个 view builder:命中缓存直接返回;否则跑 build()、缓存产物、按字节 LRU 淘汰
+async function cachedView(uid, view, range, depTables, build) {
+  const sig = await tablesSignature(uid, depTables);
+  const key = JSON.stringify([uid, view, range || {}, sig]);
+  const hit = resultCache.get(key);
+  if (hit) {
+    hit.lastAccess = Date.now();
+    return hit.value;
+  }
+  const value = await build();
+  let bytes = 0;
+  try {
+    bytes = JSON.stringify(value).length;
+  } catch {
+    bytes = 0;
+  }
+  resultCache.set(key, { value, bytes, lastAccess: Date.now() });
+  resultBytes += bytes;
+  const limit = RESULT_CACHE_MAX_MB * 1024 * 1024;
+  if (resultBytes > limit) {
+    const victims = [...resultCache.entries()].sort((a, b) => a[1].lastAccess - b[1].lastAccess);
+    for (const [k, e] of victims) {
+      if (resultBytes <= limit) break;
+      resultCache.delete(k);
+      resultBytes -= e.bytes;
+    }
+  }
+  return value;
+}
+
+function clearResultCache(uid) {
+  if (uid === undefined) {
+    resultCache.clear();
+    resultBytes = 0;
+    return;
+  }
+  const prefix = `[${uid},`;
+  for (const [k, e] of resultCache) {
+    if (k.startsWith(prefix)) {
+      resultCache.delete(k);
+      resultBytes -= e.bytes;
+    }
+  }
+}
+
 async function fileExists(filePath) {
   try {
     await fs.access(filePath);
@@ -132,6 +196,7 @@ export function resetRawCache(userId) {
     tableCache.clear();
     tableLoading.clear();
     summaryCache.clear();
+    clearResultCache();
     return;
   }
   const uid = requireUserId(userId);
@@ -139,6 +204,7 @@ export function resetRawCache(userId) {
   for (const key of tableCache.keys()) if (key.startsWith(prefix)) tableCache.delete(key);
   for (const key of tableLoading.keys()) if (key.startsWith(prefix)) tableLoading.delete(key);
   summaryCache.delete(uid);
+  clearResultCache(uid);
 }
 
 export async function clearSourceData(userId) {
@@ -786,7 +852,22 @@ export async function buildMeta(userId) {
   };
 }
 
-export async function buildProductView(userId, range = {}) {
+// 对外导出:带结果缓存的 view(同参数重复请求直接命中 ~0ms)。
+// 每个 view 声明依赖哪些源表;源文件签名变化(上传)即自动失效。
+export const buildProductView = (userId, range = {}) =>
+  cachedView(requireUserId(userId), "product", range, ["product", "adItem", "content"], () =>
+    buildProductViewRaw(userId, range)
+  );
+export const buildAdProductsView = (userId, range = {}) =>
+  cachedView(requireUserId(userId), "ad", range, ["adItem", "content"], () => buildAdProductsViewRaw(userId, range));
+export const buildKeywordView = (userId, range = {}) =>
+  cachedView(requireUserId(userId), "keyword", range, ["keyword"], () => buildKeywordViewRaw(userId, range));
+export const buildCrowdView = (userId, range = {}) =>
+  cachedView(requireUserId(userId), "crowd", range, ["crowd"], () => buildCrowdViewRaw(userId, range));
+export const buildContentView = (userId, range = {}) =>
+  cachedView(requireUserId(userId), "content", range, ["content"], () => buildContentViewRaw(userId, range));
+
+async function buildProductViewRaw(userId, range = {}) {
   const { product, adItem, content } = await loadTables(userId, ["product", "adItem", "content"]);
   const rows = filterRows(product, range, "统计日期", ["商品名称", "商品标题", "商品ID"]);
 
@@ -1044,7 +1125,7 @@ function buildAdSubject(rows) {
 
 const adFields = ["花费", "总成交金额", "展现量", "点击量", "总成交笔数", "间接成交笔数", "总购物车数", "引导访问潜客数", "引导访问人数"];
 
-export async function buildAdProductsView(userId, range = {}) {
+async function buildAdProductsViewRaw(userId, range = {}) {
   const raw = await loadTables(userId, ["adItem", "content"]);
   const rows = filterRows(adUnion(raw), range, "日期", ["主体名称", "计划名字", "场景名字"]);
   const subjects = buildAdSubject(rows);
@@ -1111,7 +1192,7 @@ export async function buildAdProductsView(userId, range = {}) {
   };
 }
 
-export async function buildKeywordView(userId, range = {}) {
+async function buildKeywordViewRaw(userId, range = {}) {
   const raw = await loadTables(userId, ["keyword"]);
   const rows = filterRows(raw.keyword, range, "日期", ["词名字/词包名字", "宝贝名称", "计划名字"]);
   const groups = new Map();
@@ -1170,7 +1251,7 @@ export async function buildKeywordView(userId, range = {}) {
   };
 }
 
-export async function buildCrowdView(userId, range = {}) {
+async function buildCrowdViewRaw(userId, range = {}) {
   const raw = await loadTables(userId, ["crowd"]);
   const rows = filterRows(raw.crowd, range, "日期", ["人群名字", "主体名称", "单元名字", "场景名字"]);
   const groups = new Map();
@@ -1222,7 +1303,7 @@ export async function buildCrowdView(userId, range = {}) {
   };
 }
 
-export async function buildContentView(userId, range = {}) {
+async function buildContentViewRaw(userId, range = {}) {
   const raw = await loadTables(userId, ["content"]);
   const rows = filterRows(raw.content, range, "日期", ["主体名称", "计划名字", "主体类型"]);
   const groups = new Map();
