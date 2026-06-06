@@ -8,13 +8,11 @@
 FROM node:22-alpine AS builder
 WORKDIR /app
 
-# 让 better-sqlite3 从 npmmirror 取预编译二进制(国内快),装不到才回退编译
+# 让 better-sqlite3 从 npmmirror 取预编译二进制(国内快)
 ENV npm_config_better_sqlite3_binary_host_mirror=https://registry.npmmirror.com/-/binary/better-sqlite3
 
-# P4.5 apk 换阿里云镜像,国内构建 apk add 提速 10-30 倍
-#（make/g++/python3 仅作"取不到预编译时回退编译"的兜底)
-RUN sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories \
- && apk add --no-cache python3 make g++
+# P4.12.2 不再装 make/g++/python3 编译工具链:better-sqlite3 走预编译二进制、无需现场编译;
+# 且 aliyun 的 alpine 镜像偶发 make 包 404 会让整次 build 失败。builder 只跑 vite build,无需 apk。
 
 COPY package.json package-lock.json ./
 
@@ -37,10 +35,9 @@ ENV NODE_OPTIONS=--max-old-space-size=8192
 ENV npm_config_better_sqlite3_binary_host_mirror=https://registry.npmmirror.com/-/binary/better-sqlite3
 WORKDIR /app
 
-# P4.5 apk 同样换镜像;tini + wget 给 HEALTHCHECK 用;
-# python3/make/g++ 只在 npm ci 期间用来编译 better-sqlite3,装完立刻清
+# tini + wget 给 ENTRYPOINT / HEALTHCHECK 用;不再装编译工具链(走预编译二进制)
 RUN sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories \
- && apk add --no-cache tini wget python3 make g++
+ && apk add --no-cache tini wget
 
 COPY package.json package-lock.json ./
 
@@ -48,8 +45,7 @@ COPY package.json package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm \
     npm ci --omit=dev --prefer-offline --no-audit --no-fund \
     --registry=https://registry.npmmirror.com \
- && npm cache clean --force \
- && apk del python3 make g++
+ && npm cache clean --force
 
 COPY --from=builder /app/dist ./dist
 COPY server ./server
