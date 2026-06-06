@@ -27,6 +27,40 @@ export default function AdminView() {
   const [retentionInput, setRetentionInput] = React.useState("0");
   const [savingRetention, setSavingRetention] = React.useState(false);
 
+  // P4.15(二)按区间在线浏览历史
+  const HVIEWS: Array<{ key: string; label: string }> = [
+    { key: "product", label: "商品维度" },
+    { key: "ad-products", label: "推广商品" },
+    { key: "keywords", label: "关键词" },
+    { key: "crowds", label: "人群" },
+    { key: "contents", label: "内容" }
+  ];
+  const [hStart, setHStart] = React.useState("");
+  const [hEnd, setHEnd] = React.useState("");
+  const [hView, setHView] = React.useState("");
+  const [hRows, setHRows] = React.useState<Array<Record<string, unknown>> | null>(null);
+  const [hLoading, setHLoading] = React.useState(false);
+
+  async function browseHistory(view: string) {
+    setErr("");
+    setHView(view);
+    setHLoading(true);
+    setHRows(null);
+    try {
+      const qs = new URLSearchParams();
+      if (hStart) qs.set("start", hStart);
+      if (hEnd) qs.set("end", hEnd);
+      const res = await fetch(`/api/admin/history/view/${view}?${qs}`, { credentials: "include" });
+      if (!res.ok) throw new Error(await readApiError(res));
+      const json = await res.json();
+      setHRows(Array.isArray(json?.table) ? json.table : []);
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : "查询失败");
+    } finally {
+      setHLoading(false);
+    }
+  }
+
   // P4.8 复制按钮的瞬态反馈:同一时刻只有一个 code 处于"刚被复制"或"复制失败"状态
   const [copyState, setCopyState] = React.useState<{ code: string; ok: boolean } | null>(null);
 
@@ -448,6 +482,69 @@ export default function AdminView() {
               关键词 {fmt(history.coverage.keyword_rows)} 行 · 人群 {fmt(history.coverage.crowd_rows)} 行
             </div>
           )}
+
+          <div
+            style={{
+              padding: 16,
+              borderRadius: 10,
+              border: "1px solid rgba(245, 200, 119, 0.18)",
+              background: "#151808",
+              marginBottom: 18
+            }}
+          >
+            <div style={{ ...muted, marginBottom: 10 }}>
+              历史在线浏览:选日期区间 → 点某个视图,按历史库该区间的数据重新计算(口径与正常视图完全一致)
+            </div>
+            <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 12 }}>
+              <label style={{ width: 160 }}>
+                <span style={authLabel}>开始</span>
+                <input style={authInput} type="date" value={hStart} onChange={(e) => setHStart(e.target.value)} />
+              </label>
+              <label style={{ width: 160 }}>
+                <span style={authLabel}>结束</span>
+                <input style={authInput} type="date" value={hEnd} onChange={(e) => setHEnd(e.target.value)} />
+              </label>
+              {HVIEWS.map((v) => (
+                <button key={v.key} onClick={() => browseHistory(v.key)} style={{ ...tabBtn(hView === v.key), padding: "8px 12px" }}>
+                  {v.label}
+                </button>
+              ))}
+            </div>
+            {hLoading && <div style={muted}>计算中...</div>}
+            {!hLoading && hRows && (
+              <div style={{ maxHeight: 360, overflow: "auto" }}>
+                <div style={{ ...muted, marginBottom: 6 }}>共 {fmt(hRows.length)} 行(显示前 100)</div>
+                {hRows.length > 0 && (
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                    <thead>
+                      <tr style={{ color: "rgba(245,240,223,0.7)" }}>
+                        {Object.keys(hRows[0])
+                          .filter((k) => typeof hRows[0][k] !== "object")
+                          .map((k) => (
+                            <th key={k} style={{ ...th, padding: "6px 8px", whiteSpace: "nowrap" }}>
+                              {k}
+                            </th>
+                          ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {hRows.slice(0, 100).map((row, i) => (
+                        <tr key={i} style={{ borderBottom: "1px solid rgba(245,200,119,0.06)" }}>
+                          {Object.keys(hRows[0])
+                            .filter((k) => typeof hRows[0][k] !== "object")
+                            .map((k) => (
+                              <td key={k} style={{ padding: "6px 8px", whiteSpace: "nowrap" }}>
+                                {String(row[k] ?? "")}
+                              </td>
+                            ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            )}
+          </div>
 
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>

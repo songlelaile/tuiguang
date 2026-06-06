@@ -867,8 +867,27 @@ export const buildCrowdView = (userId, range = {}) =>
 export const buildContentView = (userId, range = {}) =>
   cachedView(requireUserId(userId), "content", range, ["content"], () => buildContentViewRaw(userId, range));
 
-async function buildProductViewRaw(userId, range = {}) {
-  const { product, adItem, content } = await loadTables(userId, ["product", "adItem", "content"]);
+// P4.15(二)用注入的历史行直接构建视图(管理员按区间在线浏览历史)。
+// 复用同一套聚合逻辑、不经结果缓存;injected = { product/adItem/content/keyword/crowd: rows[] }。
+export async function buildViewWithRows(viewName, userId, range, injected) {
+  switch (viewName) {
+    case "product":
+      return buildProductViewRaw(userId, range, injected);
+    case "ad-products":
+      return buildAdProductsViewRaw(userId, range, injected);
+    case "keywords":
+      return buildKeywordViewRaw(userId, range, injected);
+    case "crowds":
+      return buildCrowdViewRaw(userId, range, injected);
+    case "contents":
+      return buildContentViewRaw(userId, range, injected);
+    default:
+      throw new Error(`未知视图: ${viewName}`);
+  }
+}
+
+async function buildProductViewRaw(userId, range = {}, injected = null) {
+  const { product, adItem, content } = injected || (await loadTables(userId, ["product", "adItem", "content"]));
   const rows = filterRows(product, range, "统计日期", ["商品名称", "商品标题", "商品ID"]);
 
   // 全店推广花费：从推广商品报表 + 推广内容报表的"花费"按日期聚合
@@ -1125,8 +1144,8 @@ function buildAdSubject(rows) {
 
 const adFields = ["花费", "总成交金额", "展现量", "点击量", "总成交笔数", "间接成交笔数", "总购物车数", "引导访问潜客数", "引导访问人数"];
 
-async function buildAdProductsViewRaw(userId, range = {}) {
-  const raw = await loadTables(userId, ["adItem", "content"]);
+async function buildAdProductsViewRaw(userId, range = {}, injected = null) {
+  const raw = injected || (await loadTables(userId, ["adItem", "content"]));
   const rows = filterRows(adUnion(raw), range, "日期", ["主体名称", "计划名字", "场景名字"]);
   const subjects = buildAdSubject(rows);
 
@@ -1192,8 +1211,8 @@ async function buildAdProductsViewRaw(userId, range = {}) {
   };
 }
 
-async function buildKeywordViewRaw(userId, range = {}) {
-  const raw = await loadTables(userId, ["keyword"]);
+async function buildKeywordViewRaw(userId, range = {}, injected = null) {
+  const raw = injected || (await loadTables(userId, ["keyword"]));
   const rows = filterRows(raw.keyword, range, "日期", ["词名字/词包名字", "宝贝名称", "计划名字"]);
   const groups = new Map();
   const wordGroups = new Map();
@@ -1251,8 +1270,8 @@ async function buildKeywordViewRaw(userId, range = {}) {
   };
 }
 
-async function buildCrowdViewRaw(userId, range = {}) {
-  const raw = await loadTables(userId, ["crowd"]);
+async function buildCrowdViewRaw(userId, range = {}, injected = null) {
+  const raw = injected || (await loadTables(userId, ["crowd"]));
   const rows = filterRows(raw.crowd, range, "日期", ["人群名字", "主体名称", "单元名字", "场景名字"]);
   const groups = new Map();
   const sceneWords = new Map();
@@ -1303,8 +1322,8 @@ async function buildCrowdViewRaw(userId, range = {}) {
   };
 }
 
-async function buildContentViewRaw(userId, range = {}) {
-  const raw = await loadTables(userId, ["content"]);
+async function buildContentViewRaw(userId, range = {}, injected = null) {
+  const raw = injected || (await loadTables(userId, ["content"]));
   const rows = filterRows(raw.content, range, "日期", ["主体名称", "计划名字", "主体类型"]);
   const groups = new Map();
   for (const row of rows) {

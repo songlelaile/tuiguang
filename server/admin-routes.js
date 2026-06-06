@@ -8,7 +8,17 @@ import {
   listUsers,
   updateUser
 } from "./auth.js";
-import { getCoverage, getSetting, listUploads, pruneOldHistory, setSetting } from "./history.js";
+import { getCoverage, getSetting, iterateTableRaw, listUploads, pruneOldHistory, setSetting } from "./history.js";
+import { buildViewWithRows } from "./metrics.js";
+
+// 视图 → 它依赖的历史表(注入 key → 历史表名)
+const VIEW_HISTORY_TABLES = {
+  product: { product: "product_daily", adItem: "ad_item", content: "content" },
+  "ad-products": { adItem: "ad_item", content: "content" },
+  keywords: { keyword: "keyword" },
+  crowds: { crowd: "crowd" },
+  contents: { content: "content" }
+};
 
 export function createAdminRouter(getDb) {
   const router = express.Router();
@@ -89,6 +99,29 @@ export function createAdminRouter(getDb) {
       setSetting("retention_months", m);
       const pruned = pruneOldHistory(m);
       res.json({ ok: true, retentionMonths: m, pruned });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // P4.15(二)按日期区间从历史库在线构建某个分析视图(管理员历史浏览)。
+  // 复用正常视图的全部聚合逻辑,只是数据源换成历史库该区间的行。
+  router.get("/history/view/:name", async (req, res, next) => {
+    try {
+      const map = VIEW_HISTORY_TABLES[req.params.name];
+      if (!map) return res.status(400).json({ error: "未知视图" });
+      const range = {
+        start: typeof req.query.start === "string" ? req.query.start : "",
+        end: typeof req.query.end === "string" ? req.query.end : "",
+        scene: typeof req.query.scene === "string" ? req.query.scene : "",
+        q: typeof req.query.q === "string" ? req.query.q.trim() : ""
+      };
+      const uid = req.user.id;
+      const injected = {};
+      for (const [key, table] of Object.entries(map)) {
+        injected[key] = [...iterateTableRaw(uid, table, { start: range.start, end: range.end })];
+      }
+      res.json(await buildViewWithRows(req.params.name, uid, range, injected));
     } catch (e) {
       next(e);
     }
