@@ -37,6 +37,7 @@ function ensureDb() {
   db.pragma("temp_store = MEMORY");         // 临时表 / index 放内存,避免磁盘 IO
   db.pragma("busy_timeout = 5000");         // 锁冲突时等 5s,不立即报 SQLITE_BUSY
   db.pragma("wal_autocheckpoint = 1000");   // 每 1000 page 自动 checkpoint,防 WAL 无限增长
+  db.pragma("auto_vacuum = INCREMENTAL");   // P4.14 增量回收空闲页(需一次全量 VACUUM 转换后生效,见 runHistoryMaintenance)
 
   ensureUserTables(db);
   bootstrapAdmin(db);
@@ -212,7 +213,7 @@ function requireUserId(userId) {
 
 // ---- 公共入口 ----
 
-export function ingestUpload({ userId, product = [], adItem = [], content = [], keyword = [], crowd = [], note = "" }) {
+export function ingestUpload({ userId, product = [], adItem = [], content = [], keyword = [], crowd = [], note = "", keepHistory = true }) {
   const conn = ensureDb();
   const uid = requireUserId(userId);
   const uploadedAt = new Date().toISOString();
@@ -228,6 +229,13 @@ export function ingestUpload({ userId, product = [], adItem = [], content = [], 
   const dateMax = allDates[allDates.length - 1] || null;
 
   const txn = conn.transaction(() => {
+    // P4.14 覆盖式留存:非 admin(keepHistory=false)上传前先清掉该用户的全部旧历史,
+    // 只保留本次最新一份 → 普通用户不再往历史库累积,磁盘可控。
+    if (!keepHistory) {
+      for (const t of ["product_daily", "ad_item", "content", "keyword", "crowd", "uploads"]) {
+        conn.prepare(`DELETE FROM ${t} WHERE user_id = ?`).run(uid);
+      }
+    }
     const upload = conn
       .prepare(
         `INSERT INTO uploads(user_id, uploaded_at, product_rows, ad_item_rows, content_rows, keyword_rows, crowd_rows, date_min, date_max, note)
@@ -649,4 +657,60 @@ export const tableExportName = {
 
 export function closeDb() {
   if (db) { db.close(); db = null; }
+}
+
+// ============ P4.14 历史库留存 + 自动维护 ============
+
+// N 个月前的日期(YYYY-MM-DD),用于按 last_updated_at 裁剪
+function monthsAgoIso(months) {
+  const d = new Date();
+  d.setMonth(d.getMonth() - months);
+  return d.toISOString().slice(0, 10);
+}
+
+// 留存清理:删除"最近 N 个月没再被上传刷新过"的历史行。
+// 用 last_updated_at 作判据 → admin 累积的老数据会被清;普通用户每次覆盖式上传
+// last_updated_at 都是最新,不会被误删。months<=0 表示永久保留(不清)。
+const HISTORY_TABLES = ["product_daily", "ad_item", "content", "keyword", "crowd"];
+export function pruneOldHistory(months) {
+  if (!months || months <= 0) return 0;
+  const conn = ensureDb();
+  const cutoff = monthsAgoIso(months);
+  let removed = 0;
+  const txn = conn.transaction(() => {
+    for (const t of HISTORY_TABLES) {
+      removed += conn.prepare(`DELETE FROM ${t} WHERE last_updated_at < ?`).run(cutoff).changes;
+    }
+    // 清掉没有任何数据行引用的空 uploads 记录
+    conn.prepare(
+      `DELETE FROM uploads WHERE id NOT IN (
+         SELECT upload_id FROM product_daily UNION SELECT upload_id FROM ad_item
+         UNION SELECT upload_id FROM content UNION SELECT upload_id FROM keyword
+         UNION SELECT upload_id FROM crowd)`
+    ).run();
+  });
+  txn();
+  return removed;
+}
+
+// 自动维护:留存清理 + WAL 回收 + 空间回收。建议启动后跑一次 + 每天跑。
+//   - 首次(库还不是 incremental auto_vacuum 模式):跑一次全量 VACUUM 完成转换 + 压实历史膨胀;
+//   - 之后:incremental_vacuum 增量回收,便宜、不阻塞太久。
+export function runHistoryMaintenance(retentionMonths = 0) {
+  const conn = ensureDb();
+  try {
+    const pruned = pruneOldHistory(retentionMonths);
+    if (pruned > 0) console.log(`[history] 留存清理:删除 ${pruned} 行(>${retentionMonths} 个月未刷新)`);
+    conn.pragma("wal_checkpoint(TRUNCATE)");
+    const mode = conn.pragma("auto_vacuum", { simple: true });
+    if (mode !== 2) {
+      const t0 = Date.now();
+      conn.exec("VACUUM"); // 一次性:转 incremental 模式 + 压实历史膨胀
+      console.log(`[history] 已 VACUUM(转 incremental + 压实),耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+    } else {
+      conn.pragma("incremental_vacuum");
+    }
+  } catch (e) {
+    console.error("[history] 维护失败:", e.message);
+  }
 }

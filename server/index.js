@@ -35,6 +35,7 @@ import {
   queryAdSummary,
   queryProductHistory,
   querySeries,
+  runHistoryMaintenance,
   tableExportName
 } from "./history.js";
 import { ZipArchive } from "archiver";
@@ -234,6 +235,9 @@ app.post(
           try {
             const result = ingestUpload({
               userId,
+              // P4.14 普通用户覆盖式留存:非 admin 上传前先清掉其旧历史,只留最新一份;
+              // admin 保留全量历史(供跨周期对比 / 归档看板)。
+              keepHistory: req.user.role === "admin",
               product: raw.product || [],
               adItem: raw.adItem || [],
               content: raw.content || [],
@@ -653,6 +657,18 @@ if (cluster.isPrimary) {
   sessionPruneTimer.unref();
   process.on("SIGTERM", () => clearInterval(sessionPruneTimer));
   process.on("SIGINT", () => clearInterval(sessionPruneTimer));
+
+  // P4.14 历史库自动维护:留存清理 + WAL 回收 + VACUUM/增量回收(只在主进程跑)。
+  // 启动后 30s 跑一次(首次做一次性 VACUUM 压实历史膨胀),之后每天一次。
+  // HISTORY_RETENTION_MONTHS:admin 历史保留月数,0=永久(默认);普通用户已覆盖式,不受影响。
+  const HISTORY_RETENTION_MONTHS = Number(process.env.HISTORY_RETENTION_MONTHS || 0);
+  const HISTORY_MAINT_INTERVAL_MS = Number(process.env.HISTORY_MAINT_INTERVAL_MS || 24 * 60 * 60 * 1000);
+  const historyMaintBoot = setTimeout(() => runHistoryMaintenance(HISTORY_RETENTION_MONTHS), 30 * 1000);
+  const historyMaintTimer = setInterval(() => runHistoryMaintenance(HISTORY_RETENTION_MONTHS), HISTORY_MAINT_INTERVAL_MS);
+  historyMaintBoot.unref();
+  historyMaintTimer.unref();
+  process.on("SIGTERM", () => { clearTimeout(historyMaintBoot); clearInterval(historyMaintTimer); });
+  process.on("SIGINT", () => { clearTimeout(historyMaintBoot); clearInterval(historyMaintTimer); });
 
   if (workerCount > 1) {
     console.log(`[cluster] 主进程 ${process.pid} 启动 ${workerCount} 个 worker(各持独立内存缓存)`);
