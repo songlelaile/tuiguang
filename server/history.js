@@ -177,7 +177,23 @@ function initBusinessSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_crowd_date          ON crowd(date);
     CREATE INDEX IF NOT EXISTS idx_crowd_name          ON crowd(crowd_name);
     CREATE INDEX IF NOT EXISTS idx_crowd_user          ON crowd(user_id);
+
+    -- P4.15 全局设置(键值)。目前用于 admin 可配的历史留存月数。
+    CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
   `);
+}
+
+// ---- P4.15 设置(键值)----
+export function getSetting(key, fallback = null) {
+  const conn = ensureDb();
+  const row = conn.prepare(`SELECT value FROM settings WHERE key = ?`).get(key);
+  return row ? row.value : fallback;
+}
+export function setSetting(key, value) {
+  const conn = ensureDb();
+  conn
+    .prepare(`INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+    .run(key, value == null ? null : String(value));
 }
 
 // ---- 工具 ----
@@ -696,11 +712,14 @@ export function pruneOldHistory(months) {
 // 自动维护:留存清理 + WAL 回收 + 空间回收。建议启动后跑一次 + 每天跑。
 //   - 首次(库还不是 incremental auto_vacuum 模式):跑一次全量 VACUUM 完成转换 + 压实历史膨胀;
 //   - 之后:incremental_vacuum 增量回收,便宜、不阻塞太久。
-export function runHistoryMaintenance(retentionMonths = 0) {
+export function runHistoryMaintenance(defaultRetentionMonths = 0) {
   const conn = ensureDb();
   try {
-    const pruned = pruneOldHistory(retentionMonths);
-    if (pruned > 0) console.log(`[history] 留存清理:删除 ${pruned} 行(>${retentionMonths} 个月未刷新)`);
+    // P4.15 admin 在管理页设的留存月数优先,未设则用 env 默认(HISTORY_RETENTION_MONTHS)
+    const stored = getSetting("retention_months", null);
+    const months = stored != null && stored !== "" ? Number(stored) : defaultRetentionMonths;
+    const pruned = pruneOldHistory(months);
+    if (pruned > 0) console.log(`[history] 留存清理:删除 ${pruned} 行(>${months} 个月未刷新)`);
     conn.pragma("wal_checkpoint(TRUNCATE)");
     const mode = conn.pragma("auto_vacuum", { simple: true });
     if (mode !== 2) {
