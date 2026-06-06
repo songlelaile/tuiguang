@@ -710,6 +710,9 @@ export function runHistoryMaintenance(retentionMonths = 0) {
     } else {
       conn.pragma("incremental_vacuum");
     }
+    // P4.14.1 关键:VACUUM/incremental_vacuum 在 WAL 模式下会把重建写进 WAL,
+    // 之后必须再 checkpoint(TRUNCATE) 把 WAL 落盘并截断为 0,否则 WAL 会鼓到库大小、磁盘翻倍。
+    conn.pragma("wal_checkpoint(TRUNCATE)");
   } catch (e) {
     console.error("[history] 维护失败:", e.message);
   }
