@@ -34,6 +34,7 @@ import {
   queryAdSummary,
   queryProductHistory,
   querySeries,
+  runHistoryMaintenance,
   tableExportName
 } from "./history.js";
 import { ZipArchive } from "archiver";
@@ -233,6 +234,9 @@ app.post(
           try {
             const result = ingestUpload({
               userId,
+              // P4.14 普通用户覆盖式留存:非 admin 上传前先清掉其旧历史,只留最新一份;
+              // admin 保留全量历史(供跨周期对比 / 归档看板)。
+              keepHistory: req.user.role === "admin",
               product: raw.product || [],
               adItem: raw.adItem || [],
               content: raw.content || [],
@@ -604,6 +608,18 @@ const sessionPruneTimer = setInterval(() => {
 sessionPruneTimer.unref(); // 不阻塞进程退出
 process.on("SIGTERM", () => clearInterval(sessionPruneTimer));
 process.on("SIGINT", () => clearInterval(sessionPruneTimer));
+
+// P4.14 历史库自动维护:留存清理 + WAL 回收 + VACUUM/增量回收。
+// 启动后 30s 跑一次(避开启动高峰;首次会做一次性 VACUUM 压实历史膨胀),之后每天一次。
+// HISTORY_RETENTION_MONTHS:admin 历史保留月数,0=永久(默认);普通用户已是覆盖式,不受影响。
+const HISTORY_RETENTION_MONTHS = Number(process.env.HISTORY_RETENTION_MONTHS || 0);
+const HISTORY_MAINT_INTERVAL_MS = Number(process.env.HISTORY_MAINT_INTERVAL_MS || 24 * 60 * 60 * 1000);
+const historyMaintBoot = setTimeout(() => runHistoryMaintenance(HISTORY_RETENTION_MONTHS), 30 * 1000);
+const historyMaintTimer = setInterval(() => runHistoryMaintenance(HISTORY_RETENTION_MONTHS), HISTORY_MAINT_INTERVAL_MS);
+historyMaintBoot.unref();
+historyMaintTimer.unref();
+process.on("SIGTERM", () => { clearTimeout(historyMaintBoot); clearInterval(historyMaintTimer); });
+process.on("SIGINT", () => { clearTimeout(historyMaintBoot); clearInterval(historyMaintTimer); });
 
 // OOM 早期预警:V8 fatal OOM(源表过大、全量载入内存)会直接 SIGABRT,
 // uncaughtException 捕获不到。这里定时采样堆用量,逼近上限时往 crash log 写一条
