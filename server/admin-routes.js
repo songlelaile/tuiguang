@@ -8,7 +8,7 @@ import {
   listUsers,
   updateUser
 } from "./auth.js";
-import { getCoverage, getSetting, iterateTableRaw, listUploads, pruneOldHistory, setSetting } from "./history.js";
+import { deleteHistory, getCoverage, getSetting, iterateTableRaw, listUploads, pruneOldHistory, setSetting } from "./history.js";
 import { buildViewWithRows } from "./metrics.js";
 
 // 视图 → 它依赖的历史表(注入 key → 历史表名)
@@ -122,6 +122,21 @@ export function createAdminRouter(getDb) {
         injected[key] = [...iterateTableRaw(uid, table, { start: range.start, end: range.end })];
       }
       res.json(await buildViewWithRows(req.params.name, uid, range, injected));
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // P4.16 手动删除历史数据。scope=all 全清 / before(需 before 日期)/ range(需 start/end)。删完立即回收磁盘。
+  router.delete("/history", (req, res, next) => {
+    try {
+      const scope = ["all", "before", "range"].includes(req.query.scope) ? req.query.scope : "all";
+      const start = typeof req.query.start === "string" ? req.query.start : "";
+      const end = typeof req.query.end === "string" ? req.query.end : "";
+      if (scope === "before" && !start) return res.status(400).json({ error: "请指定“早于”的日期" });
+      if (scope === "range" && !start && !end) return res.status(400).json({ error: "请指定删除区间" });
+      const removed = deleteHistory(req.user.id, { scope, start, end });
+      res.json({ ok: true, removed });
     } catch (e) {
       next(e);
     }

@@ -709,6 +709,41 @@ export function pruneOldHistory(months) {
   return removed;
 }
 
+// P4.16 管理员手动删除历史数据。scope:all=全清该用户历史 / before=某日期之前 / range=某区间。
+// 删完立即 incremental_vacuum + checkpoint,把磁盘还给系统(WITHOUT ROWID + auto_vacuum 下回收有效)。
+export function deleteHistory(userId, { scope = "all", start = "", end = "" } = {}) {
+  const conn = ensureDb();
+  const uid = requireUserId(userId);
+  let removed = 0;
+  const txn = conn.transaction(() => {
+    for (const t of HISTORY_TABLES) {
+      const where = ["user_id = @uid"];
+      const params = { uid };
+      if (scope === "range") {
+        if (start) { where.push("date >= @start"); params.start = start; }
+        if (end) { where.push("date <= @end"); params.end = end; }
+      } else if (scope === "before" && start) {
+        where.push("date < @start");
+        params.start = start;
+      }
+      // scope === "all" → 不加日期条件,清掉该用户全部历史
+      removed += conn.prepare(`DELETE FROM ${t} WHERE ${where.join(" AND ")}`).run(params).changes;
+    }
+    conn
+      .prepare(
+        `DELETE FROM uploads WHERE user_id = @uid AND id NOT IN (
+           SELECT upload_id FROM product_daily WHERE user_id=@uid UNION SELECT upload_id FROM ad_item WHERE user_id=@uid
+           UNION SELECT upload_id FROM content WHERE user_id=@uid UNION SELECT upload_id FROM keyword WHERE user_id=@uid
+           UNION SELECT upload_id FROM crowd WHERE user_id=@uid)`
+      )
+      .run({ uid });
+  });
+  txn();
+  conn.pragma("incremental_vacuum");
+  conn.pragma("wal_checkpoint(TRUNCATE)");
+  return removed;
+}
+
 // 自动维护:留存清理 + WAL 回收 + 空间回收。建议启动后跑一次 + 每天跑。
 //   - 首次(库还不是 incremental auto_vacuum 模式):跑一次全量 VACUUM 完成转换 + 压实历史膨胀;
 //   - 之后:incremental_vacuum 增量回收,便宜、不阻塞太久。

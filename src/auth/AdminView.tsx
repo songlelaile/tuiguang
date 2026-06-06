@@ -184,6 +184,33 @@ export default function AdminView() {
     }
   }
 
+  async function deleteHistoryData(scope: "all" | "before" | "range") {
+    const label =
+      scope === "all"
+        ? "全部历史数据"
+        : scope === "before"
+          ? `${hStart || "(未选日期)"} 之前的历史`
+          : `${hStart || "?"} ~ ${hEnd || "?"} 区间的历史`;
+    if (scope !== "all" && !hStart && !hEnd) {
+      setErr("请先在上方选择日期/区间");
+      return;
+    }
+    if (!window.confirm(`确定删除「${label}」?\n不可恢复(只删历史库,uploads 源文件不受影响)。`)) return;
+    setErr("");
+    try {
+      const qs = new URLSearchParams({ scope });
+      if (hStart) qs.set("start", hStart);
+      if (hEnd) qs.set("end", hEnd);
+      const res = await fetch(`/api/admin/history?${qs}`, { method: "DELETE", credentials: "include" });
+      if (!res.ok) throw new Error(await readApiError(res));
+      const json = await res.json();
+      window.alert(`已删除 ${Number(json.removed || 0).toLocaleString()} 行历史,磁盘已即时回收。`);
+      await reload();
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : "删除失败");
+    }
+  }
+
   const tabBtn = (active: boolean): React.CSSProperties => ({
     padding: "8px 14px",
     borderRadius: 6,
@@ -472,6 +499,41 @@ export default function AdminView() {
             <div style={{ ...muted, flex: 1, minWidth: 240 }}>
               超过保留期、且这段时间没再上传刷新过的历史会被每天自动清理(磁盘在下次维护时回收)。
               普通用户始终只留最新一份上传,不受此设置影响。
+            </div>
+          </div>
+
+          <div
+            style={{
+              padding: 16,
+              borderRadius: 10,
+              border: "1px solid rgba(229, 80, 80, 0.28)",
+              background: "#1a0f0c",
+              marginBottom: 18
+            }}
+          >
+            <div style={{ ...muted, marginBottom: 10, color: "#ffb3b3" }}>
+              ⚠ 删除历史数据(不可恢复;只删历史库,uploads 源文件不受影响;删完立即回收磁盘)
+            </div>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <button
+                onClick={() => deleteHistoryData("all")}
+                style={{ border: "1px solid rgba(229,80,80,0.5)", background: "rgba(229,80,80,0.85)", color: "#fff", padding: "8px 14px", borderRadius: 6, cursor: "pointer", fontWeight: 600 }}
+              >
+                清空全部历史
+              </button>
+              <button
+                onClick={() => deleteHistoryData("before")}
+                style={{ border: "1px solid rgba(229,80,80,0.4)", background: "transparent", color: "#ffb3b3", padding: "8px 14px", borderRadius: 6, cursor: "pointer" }}
+              >
+                删除「开始」日期之前
+              </button>
+              <button
+                onClick={() => deleteHistoryData("range")}
+                style={{ border: "1px solid rgba(229,80,80,0.4)", background: "transparent", color: "#ffb3b3", padding: "8px 14px", borderRadius: 6, cursor: "pointer" }}
+              >
+                删除「开始~结束」区间
+              </button>
+              <span style={muted}>区间/早于:用下方「历史在线浏览」里选的日期</span>
             </div>
           </div>
 
