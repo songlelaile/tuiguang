@@ -142,5 +142,44 @@ export function createAdminRouter(getDb) {
     }
   });
 
+  // P4.17 跨周期汇总报表:保存命名报表(视图 + 区间),下次一键重跑。存在 settings KV 的 JSON 里。
+  function getReports() {
+    try {
+      return JSON.parse(getSetting("saved_reports", "[]")) || [];
+    } catch {
+      return [];
+    }
+  }
+  router.get("/reports", (req, res, next) => {
+    try {
+      res.json({ reports: getReports() });
+    } catch (e) {
+      next(e);
+    }
+  });
+  router.post("/reports", (req, res, next) => {
+    try {
+      const { name, view, start, end } = req.body || {};
+      if (!name || !VIEW_HISTORY_TABLES[view]) {
+        return res.status(400).json({ error: "缺少报表名称,或视图无效" });
+      }
+      const reports = getReports();
+      const id = `r${reports.reduce((m, r) => Math.max(m, Number(r.id?.slice(1)) || 0), 0) + 1}`;
+      reports.unshift({ id, name: String(name).slice(0, 60), view, start: start || "", end: end || "" });
+      setSetting("saved_reports", JSON.stringify(reports.slice(0, 50)));
+      res.json({ ok: true, id });
+    } catch (e) {
+      next(e);
+    }
+  });
+  router.delete("/reports/:id", (req, res, next) => {
+    try {
+      setSetting("saved_reports", JSON.stringify(getReports().filter((r) => r.id !== req.params.id)));
+      res.json({ ok: true });
+    } catch (e) {
+      next(e);
+    }
+  });
+
   return router;
 }

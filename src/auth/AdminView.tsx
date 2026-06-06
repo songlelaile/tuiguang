@@ -41,15 +41,15 @@ export default function AdminView() {
   const [hRows, setHRows] = React.useState<Array<Record<string, unknown>> | null>(null);
   const [hLoading, setHLoading] = React.useState(false);
 
-  async function browseHistory(view: string) {
+  async function browseHistory(view: string, start: string = hStart, end: string = hEnd) {
     setErr("");
     setHView(view);
     setHLoading(true);
     setHRows(null);
     try {
       const qs = new URLSearchParams();
-      if (hStart) qs.set("start", hStart);
-      if (hEnd) qs.set("end", hEnd);
+      if (start) qs.set("start", start);
+      if (end) qs.set("end", end);
       const res = await fetch(`/api/admin/history/view/${view}?${qs}`, { credentials: "include" });
       if (!res.ok) throw new Error(await readApiError(res));
       const json = await res.json();
@@ -59,6 +59,65 @@ export default function AdminView() {
     } finally {
       setHLoading(false);
     }
+  }
+
+  // P4.17 汇总报表:保存(视图+区间)成命名报表,一键重跑 + 导出 CSV
+  type Report = { id: string; name: string; view: string; start: string; end: string };
+  const [reports, setReports] = React.useState<Report[]>([]);
+  const [reportName, setReportName] = React.useState("");
+  async function loadReports() {
+    try {
+      const res = await fetch("/api/admin/reports", { credentials: "include" });
+      if (res.ok) setReports((await res.json()).reports || []);
+    } catch {
+      /* 忽略 */
+    }
+  }
+  async function saveReport() {
+    if (!reportName.trim() || !hView) {
+      setErr("请先点一个视图查询,并填报表名");
+      return;
+    }
+    setErr("");
+    try {
+      const res = await fetch("/api/admin/reports", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ name: reportName.trim(), view: hView, start: hStart, end: hEnd })
+      });
+      if (!res.ok) throw new Error(await readApiError(res));
+      setReportName("");
+      await loadReports();
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : "保存失败");
+    }
+  }
+  function runReport(r: Report) {
+    setHStart(r.start);
+    setHEnd(r.end);
+    setHView(r.view);
+    browseHistory(r.view, r.start, r.end);
+  }
+  async function deleteReport(id: string) {
+    try {
+      await fetch(`/api/admin/reports/${id}`, { method: "DELETE", credentials: "include" });
+      await loadReports();
+    } catch {
+      /* 忽略 */
+    }
+  }
+  function exportCsv() {
+    if (!hRows || hRows.length === 0) return;
+    const cols = Object.keys(hRows[0]).filter((k) => typeof hRows[0][k] !== "object");
+    const esc = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const csv = "﻿" + [cols.join(","), ...hRows.map((row) => cols.map((c) => esc(row[c])).join(","))].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `汇总_${hView}_${hStart || "全部"}_${hEnd || ""}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
   }
 
   // P4.8 复制按钮的瞬态反馈:同一时刻只有一个 code 处于"刚被复制"或"复制失败"状态
@@ -103,6 +162,7 @@ export default function AdminView() {
         const json = await res.json();
         setHistory(json);
         setRetentionInput(json.retentionMonths == null ? "0" : String(json.retentionMonths));
+        await loadReports();
       }
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : "加载失败");
@@ -572,10 +632,56 @@ export default function AdminView() {
                 </button>
               ))}
             </div>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+              <input
+                style={{ ...authInput, width: 200, marginTop: 0 }}
+                placeholder="报表名(保存当前视图+区间)"
+                value={reportName}
+                onChange={(e) => setReportName(e.target.value)}
+              />
+              <button onClick={saveReport} style={{ ...tabBtn(false), padding: "8px 12px" }}>
+                保存为报表
+              </button>
+              {reports.map((r) => (
+                <span
+                  key={r.id}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    border: "1px solid rgba(245,200,119,0.3)",
+                    borderRadius: 6,
+                    padding: "4px 8px",
+                    fontSize: 12
+                  }}
+                >
+                  <button
+                    onClick={() => runReport(r)}
+                    title={`${r.view} ${r.start || "全部"}~${r.end || ""}`}
+                    style={{ background: "transparent", border: "none", color: "#f5c877", cursor: "pointer", fontSize: 12 }}
+                  >
+                    ▶ {r.name}
+                  </button>
+                  <button
+                    onClick={() => deleteReport(r.id)}
+                    style={{ background: "transparent", border: "none", color: "#ffb3b3", cursor: "pointer", fontSize: 12 }}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
             {hLoading && <div style={muted}>计算中...</div>}
             {!hLoading && hRows && (
               <div style={{ maxHeight: 360, overflow: "auto" }}>
-                <div style={{ ...muted, marginBottom: 6 }}>共 {fmt(hRows.length)} 行(显示前 100)</div>
+                <div style={{ ...muted, marginBottom: 6, display: "flex", gap: 12, alignItems: "center" }}>
+                  <span>共 {fmt(hRows.length)} 行(显示前 100)</span>
+                  {hRows.length > 0 && (
+                    <button onClick={exportCsv} style={{ ...tabBtn(false), padding: "4px 10px", fontSize: 12 }}>
+                      导出 CSV(全部)
+                    </button>
+                  )}
+                </div>
                 {hRows.length > 0 && (
                   <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                     <thead>
