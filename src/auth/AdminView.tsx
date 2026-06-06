@@ -9,13 +9,57 @@ import type { AdminUser, Invite } from "./shared";
 import { readApiError } from "../lib/api";
 
 export default function AdminView() {
-  const [tab, setTab] = React.useState<"invites" | "users">("invites");
+  const [tab, setTab] = React.useState<"invites" | "users" | "history">("invites");
   const [invites, setInvites] = React.useState<Invite[]>([]);
   const [users, setUsers] = React.useState<AdminUser[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [err, setErr] = React.useState("");
   const [note, setNote] = React.useState("");
   const [maxUses, setMaxUses] = React.useState(1);
+
+  // P4.15 历史数据看板
+  type UploadRow = Record<string, number | string | null>;
+  const [history, setHistory] = React.useState<{
+    retentionMonths: number | null;
+    uploads: UploadRow[];
+    coverage: Record<string, number | string | null>;
+  } | null>(null);
+  const [retentionInput, setRetentionInput] = React.useState("0");
+  const [savingRetention, setSavingRetention] = React.useState(false);
+
+  // P4.15(二)按区间在线浏览历史
+  const HVIEWS: Array<{ key: string; label: string }> = [
+    { key: "product", label: "商品维度" },
+    { key: "ad-products", label: "推广商品" },
+    { key: "keywords", label: "关键词" },
+    { key: "crowds", label: "人群" },
+    { key: "contents", label: "内容" }
+  ];
+  const [hStart, setHStart] = React.useState("");
+  const [hEnd, setHEnd] = React.useState("");
+  const [hView, setHView] = React.useState("");
+  const [hRows, setHRows] = React.useState<Array<Record<string, unknown>> | null>(null);
+  const [hLoading, setHLoading] = React.useState(false);
+
+  async function browseHistory(view: string) {
+    setErr("");
+    setHView(view);
+    setHLoading(true);
+    setHRows(null);
+    try {
+      const qs = new URLSearchParams();
+      if (hStart) qs.set("start", hStart);
+      if (hEnd) qs.set("end", hEnd);
+      const res = await fetch(`/api/admin/history/view/${view}?${qs}`, { credentials: "include" });
+      if (!res.ok) throw new Error(await readApiError(res));
+      const json = await res.json();
+      setHRows(Array.isArray(json?.table) ? json.table : []);
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : "查询失败");
+    } finally {
+      setHLoading(false);
+    }
+  }
 
   // P4.8 复制按钮的瞬态反馈:同一时刻只有一个 code 处于"刚被复制"或"复制失败"状态
   const [copyState, setCopyState] = React.useState<{ code: string; ok: boolean } | null>(null);
@@ -48,11 +92,17 @@ export default function AdminView() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = await res.json();
         setInvites(json.invites || []);
-      } else {
+      } else if (tab === "users") {
         const res = await fetch("/api/admin/users", { credentials: "include" });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = await res.json();
         setUsers(json.users || []);
+      } else {
+        const res = await fetch("/api/admin/history", { credentials: "include" });
+        if (!res.ok) throw new Error(await readApiError(res));
+        const json = await res.json();
+        setHistory(json);
+        setRetentionInput(json.retentionMonths == null ? "0" : String(json.retentionMonths));
       }
     } catch (e: unknown) {
       setErr(e instanceof Error ? e.message : "加载失败");
@@ -114,6 +164,26 @@ export default function AdminView() {
     }
   }
 
+  async function saveRetention() {
+    setErr("");
+    setSavingRetention(true);
+    try {
+      const months = Math.max(0, Math.min(120, Math.floor(Number(retentionInput) || 0)));
+      const res = await fetch("/api/admin/history/retention", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ months })
+      });
+      if (!res.ok) throw new Error(await readApiError(res));
+      await reload();
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : "保存失败");
+    } finally {
+      setSavingRetention(false);
+    }
+  }
+
   const tabBtn = (active: boolean): React.CSSProperties => ({
     padding: "8px 14px",
     borderRadius: 6,
@@ -126,6 +196,8 @@ export default function AdminView() {
   const th: React.CSSProperties = { textAlign: "left", padding: "10px 8px" };
   const td: React.CSSProperties = { padding: "10px 8px" };
   const muted: React.CSSProperties = { fontSize: 12, color: "rgba(245,240,223,0.7)" };
+  const fmt = (n: number | string | null | undefined) =>
+    n == null || n === "" ? "—" : Number(n).toLocaleString();
 
   return (
     <div style={{ padding: "8px 0 32px" }}>
@@ -135,6 +207,9 @@ export default function AdminView() {
         </button>
         <button onClick={() => setTab("users")} style={tabBtn(tab === "users")}>
           用户列表
+        </button>
+        <button onClick={() => setTab("history")} style={tabBtn(tab === "history")}>
+          历史数据
         </button>
       </div>
       {err && <div style={authError}>{err}</div>}
@@ -359,6 +434,172 @@ export default function AdminView() {
               ))}
           </tbody>
         </table>
+      )}
+
+      {tab === "history" && (
+        <div>
+          <div
+            style={{
+              padding: 16,
+              borderRadius: 10,
+              border: "1px solid rgba(245, 200, 119, 0.18)",
+              background: "#151808",
+              marginBottom: 18,
+              display: "flex",
+              gap: 12,
+              alignItems: "flex-end",
+              flexWrap: "wrap"
+            }}
+          >
+            <label style={{ width: 220 }}>
+              <span style={authLabel}>历史保留月数(0 = 永久)</span>
+              <input
+                style={authInput}
+                type="number"
+                min={0}
+                max={120}
+                value={retentionInput}
+                onChange={(e) => setRetentionInput(e.target.value)}
+              />
+            </label>
+            <button
+              onClick={saveRetention}
+              disabled={savingRetention}
+              style={{ ...authBtn, width: "auto", padding: "10px 18px", marginTop: 0 }}
+            >
+              {savingRetention ? "保存中..." : "保存留存策略"}
+            </button>
+            <div style={{ ...muted, flex: 1, minWidth: 240 }}>
+              超过保留期、且这段时间没再上传刷新过的历史会被每天自动清理(磁盘在下次维护时回收)。
+              普通用户始终只留最新一份上传,不受此设置影响。
+            </div>
+          </div>
+
+          {history?.coverage && (
+            <div style={{ ...muted, marginBottom: 14 }}>
+              历史库覆盖:共 {fmt(history.coverage.uploads)} 次上传 · 商品 {fmt(history.coverage.product_rows)} 行 ·
+              推广商品 {fmt(history.coverage.ad_item_rows)} 行 · 推广内容 {fmt(history.coverage.content_rows)} 行 ·
+              关键词 {fmt(history.coverage.keyword_rows)} 行 · 人群 {fmt(history.coverage.crowd_rows)} 行
+            </div>
+          )}
+
+          <div
+            style={{
+              padding: 16,
+              borderRadius: 10,
+              border: "1px solid rgba(245, 200, 119, 0.18)",
+              background: "#151808",
+              marginBottom: 18
+            }}
+          >
+            <div style={{ ...muted, marginBottom: 10 }}>
+              历史在线浏览:选日期区间 → 点某个视图,按历史库该区间的数据重新计算(口径与正常视图完全一致)
+            </div>
+            <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 12 }}>
+              <label style={{ width: 160 }}>
+                <span style={authLabel}>开始</span>
+                <input style={authInput} type="date" value={hStart} onChange={(e) => setHStart(e.target.value)} />
+              </label>
+              <label style={{ width: 160 }}>
+                <span style={authLabel}>结束</span>
+                <input style={authInput} type="date" value={hEnd} onChange={(e) => setHEnd(e.target.value)} />
+              </label>
+              {HVIEWS.map((v) => (
+                <button key={v.key} onClick={() => browseHistory(v.key)} style={{ ...tabBtn(hView === v.key), padding: "8px 12px" }}>
+                  {v.label}
+                </button>
+              ))}
+            </div>
+            {hLoading && <div style={muted}>计算中...</div>}
+            {!hLoading && hRows && (
+              <div style={{ maxHeight: 360, overflow: "auto" }}>
+                <div style={{ ...muted, marginBottom: 6 }}>共 {fmt(hRows.length)} 行(显示前 100)</div>
+                {hRows.length > 0 && (
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                    <thead>
+                      <tr style={{ color: "rgba(245,240,223,0.7)" }}>
+                        {Object.keys(hRows[0])
+                          .filter((k) => typeof hRows[0][k] !== "object")
+                          .map((k) => (
+                            <th key={k} style={{ ...th, padding: "6px 8px", whiteSpace: "nowrap" }}>
+                              {k}
+                            </th>
+                          ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {hRows.slice(0, 100).map((row, i) => (
+                        <tr key={i} style={{ borderBottom: "1px solid rgba(245,200,119,0.06)" }}>
+                          {Object.keys(hRows[0])
+                            .filter((k) => typeof hRows[0][k] !== "object")
+                            .map((k) => (
+                              <td key={k} style={{ padding: "6px 8px", whiteSpace: "nowrap" }}>
+                                {String(row[k] ?? "")}
+                              </td>
+                            ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            )}
+          </div>
+
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr
+                style={{
+                  borderBottom: "1px solid rgba(245, 200, 119, 0.2)",
+                  color: "rgba(245, 240, 223, 0.7)",
+                  fontSize: 12
+                }}
+              >
+                <th style={th}>上传时间</th>
+                <th style={th}>数据区间</th>
+                <th style={th}>商品</th>
+                <th style={th}>推广商品</th>
+                <th style={th}>推广内容</th>
+                <th style={th}>关键词</th>
+                <th style={th}>人群</th>
+                <th style={th}>备注</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading && (
+                <tr>
+                  <td colSpan={8} style={td}>
+                    加载中...
+                  </td>
+                </tr>
+              )}
+              {!loading && (!history || history.uploads.length === 0) && (
+                <tr>
+                  <td colSpan={8} style={{ ...td, color: "rgba(245,240,223,0.5)" }}>
+                    暂无上传归档
+                  </td>
+                </tr>
+              )}
+              {!loading &&
+                history?.uploads.map((u) => (
+                  <tr key={String(u.id)} style={{ borderBottom: "1px solid rgba(245, 200, 119, 0.08)" }}>
+                    <td style={{ ...td, ...muted }}>
+                      {String(u.uploaded_at || "").slice(0, 19).replace("T", " ")}
+                    </td>
+                    <td style={{ ...td, ...muted }}>
+                      {u.date_min || "—"} ~ {u.date_max || "—"}
+                    </td>
+                    <td style={td}>{fmt(u.product_rows)}</td>
+                    <td style={td}>{fmt(u.ad_item_rows)}</td>
+                    <td style={td}>{fmt(u.content_rows)}</td>
+                    <td style={td}>{fmt(u.keyword_rows)}</td>
+                    <td style={td}>{fmt(u.crowd_rows)}</td>
+                    <td style={{ ...td, fontSize: 12 }}>{u.note || "—"}</td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );
