@@ -8,10 +8,10 @@
 
 import rateLimit from "express-rate-limit";
 
-// 登录:15 分钟内同 IP 最多 10 次,失败才计数(成功登录不消耗配额)
+// 登录:15 分钟内同 IP 最多 20 次失败(成功登录不消耗配额);LOGIN_RATE_MAX 可覆盖
 export const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 10,
+  max: Number(process.env.LOGIN_RATE_MAX || 20),
   standardHeaders: "draft-7",
   legacyHeaders: false,
   skipSuccessfulRequests: true,
