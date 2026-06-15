@@ -259,6 +259,244 @@ function HistoryArchivePanel({ refreshSignal }: { refreshSignal?: unknown }) {
   );
 }
 
+// ============ 生意参谋多日表合并 ============
+
+type BaPreflightReport = {
+  fileCount: number;
+  parsedCount: number;
+  detectedStart: string;
+  detectedEnd: string;
+  headerStandard: string[];
+  columnCount: number;
+  files: Array<{ name: string; date: string; rows: number; headerOk?: boolean; isRange?: boolean; dateMismatchCount?: number }>;
+  headerMismatches: Array<{ name: string; reason: string }>;
+  headerMissing: Array<{ name: string; reason: string }>;
+  noDateFiles: string[];
+  rangeFiles: Array<{ name: string; dates: string[] }>;
+  duplicateDates: Array<{ date: string; files: string[] }>;
+  missingDates: string[];
+  dateRowMismatches: Array<{ name: string; expected: string; foundSample: string[]; count: number }>;
+  totalRows: number;
+  blocking: string[];
+  needsResolution: boolean;
+  canMerge: boolean;
+};
+
+type BaSummary = { fileCount: number; rows: number; columns: number; firstDate: string; lastDate: string };
+
+function BusinessAdvisorMergePanel({ onMetaChange }: { onMetaChange: (meta: Meta) => void }) {
+  const [files, setFiles] = React.useState<File[]>([]);
+  const [store, setStore] = React.useState("");
+  const [start, setStart] = React.useState("");
+  const [end, setEnd] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const [report, setReport] = React.useState<BaPreflightReport | null>(null);
+  const [jobId, setJobId] = React.useState("");
+  const [resolution, setResolution] = React.useState<Record<string, string>>({});
+  const [result, setResult] = React.useState<{ summary: BaSummary; downloadUrl: string } | null>(null);
+  const [message, setMessage] = React.useState("");
+  const [inputKey, setInputKey] = React.useState(0);
+
+  function clearReport() {
+    setReport(null);
+    setJobId("");
+    setResolution({});
+    setResult(null);
+  }
+
+  async function runPreflight() {
+    if (!files.length) return;
+    setBusy(true);
+    setMessage("");
+    setResult(null);
+    try {
+      const fd = new FormData();
+      files.forEach((f) => fd.append("files", f));
+      if (start) fd.append("start", start);
+      if (end) fd.append("end", end);
+      const res = await fetch("/api/ba-merge/preflight", { method: "POST", body: fd });
+      if (!res.ok) throw new Error(await readApiError(res));
+      const payload = await res.json();
+      const rep: BaPreflightReport = payload.report;
+      setJobId(payload.jobId);
+      setReport(rep);
+      // 默认每个重复日期保留文件名排序靠后的一份（通常是后导出的），用户可改
+      const def: Record<string, string> = {};
+      for (const d of rep.duplicateDates) def[d.date] = [...d.files].sort()[d.files.length - 1];
+      setResolution(def);
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : "预检失败");
+      clearReport();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runMerge() {
+    if (!jobId || !report) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      const res = await fetch("/api/ba-merge/apply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jobId, resolution, store, start, end, applyAsProduct: true })
+      });
+      if (!res.ok) throw new Error(await readApiError(res));
+      const payload = await res.json();
+      setResult({ summary: payload.summary, downloadUrl: payload.downloadUrl });
+      if (payload.meta) onMetaChange(payload.meta);
+      const s: BaSummary = payload.summary;
+      setMessage(`合并完成：${fmtInt(s.fileCount)} 个文件 / ${fmtInt(s.rows)} 行 / ${s.columns} 列 / ${s.firstDate} 至 ${s.lastDate}${payload.applied ? "，已应用为「商品维度」源表并入库" : ""}`);
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : "合并失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const hasBlocking = Boolean(report && report.blocking.length);
+
+  return (
+    <div className="panel">
+      <div className="panelHeader">
+        <div>
+          <p className="eyebrow">数据接入 · 自动合并</p>
+          <h2>生意参谋多日表合并</h2>
+        </div>
+        <span className="pill">{files.length ? `已选 ${files.length} 个文件` : "选择多份日表 .xls"}</span>
+      </div>
+      <div className="baHint">
+        选择一批 <code>【生意参谋平台】商品_全部_YYYY-MM-DD_…xls</code> 日表，先预检（日期完整性 / 表头一致 / 统计日期匹配 / 重复日期），确认无误后合并成单个 .xlsx 并应用为「商品维度」源表。
+      </div>
+      <div className="uploadGrid">
+        <label key={`ba-${inputKey}`} className="uploadSlot">
+          <span>生意参谋日表（可多选）</span>
+          <strong>{files.length ? `${files.length} 个文件` : "选择文件"}</strong>
+          <em>.xls / .xlsx</em>
+          <input
+            type="file"
+            accept=".xls,.xlsx"
+            multiple
+            onChange={(e) => {
+              const picked = Array.from(e.target.files || []).filter((f) => /\.(xls|xlsx)$/i.test(f.name));
+              setFiles(picked);
+              clearReport();
+            }}
+          />
+        </label>
+      </div>
+      <div className="historyExportRow">
+        <label>
+          <span>店铺 / 品牌名（可选）</span>
+          <input type="text" value={store} placeholder="用于命名输出文件" onChange={(e) => setStore(e.target.value)} />
+        </label>
+        <label>
+          <span>开始日期（可选，校验缺失）</span>
+          <input type="date" value={start} onChange={(e) => { setStart(e.target.value); clearReport(); }} />
+        </label>
+        <label>
+          <span>结束日期（可选，校验缺失）</span>
+          <input type="date" value={end} onChange={(e) => { setEnd(e.target.value); clearReport(); }} />
+        </label>
+      </div>
+      <div className="uploadActions">
+        <button type="button" className="primaryButton" disabled={!files.length || busy} onClick={runPreflight}>
+          {busy && !report ? "预检中" : "预检"}
+        </button>
+        {report && !hasBlocking && (
+          <button type="button" className="primaryButton" disabled={busy} onClick={runMerge}>
+            {busy ? "合并中" : "执行合并并应用为商品维度源表"}
+          </button>
+        )}
+        {(files.length > 0 || report) && (
+          <button type="button" className="iconTextButton" disabled={busy} onClick={() => { setFiles([]); clearReport(); setMessage(""); setInputKey((k) => k + 1); }}>
+            清除
+          </button>
+        )}
+      </div>
+
+      {report && (
+        <div className="baReport">
+          <div className="historyMeta">
+            <span>文件数 <strong>{fmtInt(report.fileCount)}</strong></span>
+            <span>识别日期 <strong>{report.detectedStart || "—"}</strong> ~ <strong>{report.detectedEnd || "—"}</strong></span>
+            <span>合计数据行 <strong>{fmtInt(report.totalRows)}</strong></span>
+            <span>表头列数 <strong>{report.columnCount}</strong></span>
+          </div>
+
+          {hasBlocking && (
+            <div className="baIssue baIssueDanger">
+              <strong>无法合并，请先修复：</strong>
+              <ul>
+                {report.headerMissing.map((h, i) => <li key={`hm-${i}`}>{h.name}：{h.reason}</li>)}
+                {report.headerMismatches.map((h, i) => <li key={`hx-${i}`}>{h.name}：{h.reason}</li>)}
+                {report.noDateFiles.map((n, i) => <li key={`nd-${i}`}>{n}：文件名中无法识别日期</li>)}
+              </ul>
+            </div>
+          )}
+
+          {report.duplicateDates.length > 0 && (
+            <div className="baIssue baIssueWarn">
+              <strong>发现重复日期（同一天多份文件），请选择每个日期保留哪一份：</strong>
+              {report.duplicateDates.map((d) => (
+                <div key={d.date} className="baDupRow">
+                  <span className="baDupDate">{d.date}</span>
+                  <select
+                    value={resolution[d.date] || ""}
+                    onChange={(e) => setResolution((prev) => ({ ...prev, [d.date]: e.target.value }))}
+                  >
+                    {d.files.map((name) => <option key={name} value={name}>{name}</option>)}
+                  </select>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {report.missingDates.length > 0 && (
+            <div className="baIssue baIssueWarn">
+              <strong>区间内缺失 {report.missingDates.length} 天：</strong>
+              <span className="baInline">{report.missingDates.join("、")}</span>
+            </div>
+          )}
+
+          {report.dateRowMismatches.length > 0 && (
+            <div className="baIssue baIssueWarn">
+              <strong>以下文件存在「统计日期 ≠ 文件名日期」的行（仍可合并，统计日期将以文件名日期为准）：</strong>
+              <ul>
+                {report.dateRowMismatches.map((m, i) => (
+                  <li key={`drm-${i}`}>{m.name}：期望 {m.expected}，发现 {m.foundSample.join("/")} 等 {fmtInt(m.count)} 行</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {report.rangeFiles.length > 0 && (
+            <div className="baIssue baIssueWarn">
+              <strong>以下文件名含跨日期区间（非单日导出），将按首个日期归类：</strong>
+              <span className="baInline">{report.rangeFiles.map((r) => r.name).join("、")}</span>
+            </div>
+          )}
+
+          {!hasBlocking && report.duplicateDates.length === 0 && report.missingDates.length === 0 && report.dateRowMismatches.length === 0 && (
+            <div className="baIssue baIssueOk">校验通过，可直接合并。</div>
+          )}
+        </div>
+      )}
+
+      {result && (
+        <div className="historyExportRow baResultRow">
+          <a className="exportButton" href={result.downloadUrl} download>
+            下载合并后的 .xlsx
+          </a>
+        </div>
+      )}
+
+      {message && <div className="uploadNotice">{message}</div>}
+    </div>
+  );
+}
+
 // ============ 主组件 ============
 
 export default function SourcesView({ meta, onMetaChange }: { meta: Meta | null; onMetaChange: (meta: Meta) => void }) {
@@ -359,6 +597,7 @@ export default function SourcesView({ meta, onMetaChange }: { meta: Meta | null;
         </div>
         {message && <div className="uploadNotice">{message}</div>}
       </div>
+      <BusinessAdvisorMergePanel onMetaChange={onMetaChange} />
       <div className="panel">
         <div className="panelHeader">
           <div>

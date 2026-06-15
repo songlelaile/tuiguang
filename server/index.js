@@ -48,6 +48,7 @@ import {
 } from "./auth.js";
 import { createAuthRouter } from "./auth-routes.js";
 import { createAdminRouter } from "./admin-routes.js";
+import { preflight as baPreflight, mergeFiles as baMergeFiles, workbookBuffer as baWorkbookBuffer } from "./business-advisor-merge.js";
 
 const app = express();
 const port = Number(process.env.PORT || 5174);
@@ -112,6 +113,74 @@ const upload = multer({
     callback(null, true);
   }
 });
+
+// 生意参谋多日表合并：接受多份 .xls/.xlsx，先落到根级临时目录，路由内再归到 job 目录
+const baTmpDir = path.join(getRootUploadDir(), "_ba", "_tmp");
+const baMaxFiles = Number(process.env.BA_MERGE_MAX_FILES || 400);
+const uploadBa = multer({
+  storage: multer.diskStorage({
+    destination(_req, _file, callback) {
+      fsSync.mkdirSync(baTmpDir, { recursive: true });
+      callback(null, baTmpDir);
+    },
+    filename(_req, file, callback) {
+      const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      callback(null, `${suffix}${path.extname(file.originalname).toLowerCase()}`);
+    }
+  }),
+  limits: { fileSize: uploadMaxMb * 1024 * 1024, files: baMaxFiles },
+  fileFilter(_req, file, callback) {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (![".xls", ".xlsx"].includes(ext)) {
+      callback(new Error(`仅支持 .xls / .xlsx 文件（${file.originalname}）`));
+      return;
+    }
+    callback(null, true);
+  }
+});
+
+// multer 把中文文件名按 latin1 解码，这里还原成 utf8
+function decodeOriginalName(name) {
+  try {
+    return Buffer.from(name, "latin1").toString("utf8");
+  } catch {
+    return name;
+  }
+}
+
+function baUserRoot(userId) {
+  return path.join(getRootUploadDir(), "_ba", String(userId));
+}
+function baJobDir(userId, jobId) {
+  if (!/^[0-9a-z][0-9a-z-]{0,80}$/i.test(String(jobId || ""))) {
+    throw new Error("非法的任务编号");
+  }
+  return path.join(baUserRoot(userId), String(jobId));
+}
+
+// 清理超过 24h 的旧 job 目录（尽力而为，失败不影响主流程）
+async function cleanupOldBaJobs(userId) {
+  const root = baUserRoot(userId);
+  try {
+    const entries = await fs.readdir(root, { withFileTypes: true });
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    await Promise.all(
+      entries
+        .filter((e) => e.isDirectory())
+        .map(async (e) => {
+          const dir = path.join(root, e.name);
+          try {
+            const st = await fs.stat(dir);
+            if (st.mtimeMs < cutoff) await fs.rm(dir, { recursive: true, force: true });
+          } catch {
+            /* 忽略单个目录的清理失败 */
+          }
+        })
+    );
+  } catch {
+    /* 目录还不存在等情况，忽略 */
+  }
+}
 
 const corsOriginEnv = process.env.CORS_ORIGIN || "";
 const corsAllowlist = corsOriginEnv
@@ -271,6 +340,148 @@ app.delete("/api/uploads/sources", async (req, res, next) => {
   try {
     await clearSourceData(req.user.id);
     res.json({ ok: true, meta: await buildMeta(req.user.id) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ============ 生意参谋多日表合并 ============
+
+// 预检：上传多份 .xls/.xlsx → 落到 job 目录 → 解析校验 → 返回报告（不合并）
+app.post("/api/ba-merge/preflight", uploadBa.array("files", baMaxFiles), async (req, res, next) => {
+  const userId = req.user.id;
+  const received = req.files || [];
+  if (!received.length) {
+    res.status(400).json({ error: "请至少选择一份 .xls 文件" });
+    return;
+  }
+  let jobDir;
+  try {
+    await cleanupOldBaJobs(userId);
+    const jobId = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+    jobDir = baJobDir(userId, jobId);
+    await fs.mkdir(jobDir, { recursive: true });
+
+    const manifest = [];
+    for (const file of received) {
+      const disk = path.basename(file.path);
+      const name = decodeOriginalName(file.originalname);
+      await fs.rename(file.path, path.join(jobDir, disk));
+      manifest.push({ disk, name });
+    }
+    await fs.writeFile(path.join(jobDir, "manifest.json"), JSON.stringify(manifest), "utf8");
+
+    const start = String(req.query.start || req.body?.start || "").trim();
+    const end = String(req.query.end || req.body?.end || "").trim();
+    const files = manifest.map((m) => ({ name: m.name, path: path.join(jobDir, m.disk) }));
+    const report = await baPreflight(files, { start, end });
+    res.json({ jobId, report });
+  } catch (error) {
+    // 失败时清理已落地的临时文件
+    await Promise.all(received.map((file) => fs.rm(file.path, { force: true }).catch(() => {})));
+    if (jobDir) await fs.rm(jobDir, { recursive: true, force: true }).catch(() => {});
+    next(error);
+  }
+});
+
+// 应用：按 resolution 合并 job 目录里的文件 → 写出 merged.xlsx → 可选写入「商品维度」源表并入库
+app.post("/api/ba-merge/apply", async (req, res, next) => {
+  const userId = req.user.id;
+  try {
+    const { jobId, resolution = {}, start = "", end = "", store = "", applyAsProduct = true } = req.body || {};
+    const jobDir = baJobDir(userId, jobId);
+    let manifest;
+    try {
+      manifest = JSON.parse(await fs.readFile(path.join(jobDir, "manifest.json"), "utf8"));
+    } catch {
+      res.status(404).json({ error: "任务已过期或不存在，请重新预检" });
+      return;
+    }
+
+    const files = manifest.map((m) => ({ name: m.name, path: path.join(jobDir, m.disk) }));
+    const { aoa, summary } = await baMergeFiles(files, { resolution, start: String(start).trim(), end: String(end).trim() });
+    if (!summary.rows) {
+      res.status(400).json({ error: "合并结果为空：没有落在日期范围内的有效数据" });
+      return;
+    }
+
+    const buffer = baWorkbookBuffer(aoa);
+    await fs.writeFile(path.join(jobDir, "merged.xlsx"), buffer);
+
+    const safeStore = String(store).trim().replace(/[\\/:*?"<>|]/g, "").slice(0, 40);
+    const downloadName = `${safeStore || "生意参谋商品全部"}_${summary.firstDate}至${summary.lastDate}_合并.xlsx`;
+    await fs.writeFile(path.join(jobDir, "result.json"), JSON.stringify({ summary, downloadName }), "utf8");
+
+    let meta = null;
+    let applied = false;
+    if (applyAsProduct) {
+      const productPath = getUploadedSourcePath(userId, "product");
+      await fs.mkdir(path.dirname(productPath), { recursive: true });
+      let backupPath = "";
+      if (await fileExists(productPath)) {
+        backupPath = `${productPath}.bak-${Date.now()}`;
+        await fs.rename(productPath, backupPath);
+      }
+      try {
+        await fs.writeFile(productPath, buffer);
+        resetRawCache(userId);
+        meta = await buildMeta(userId);
+        if (backupPath) await fs.rm(backupPath, { force: true });
+        applied = true;
+      } catch (err) {
+        // 回滚到备份
+        if (backupPath && (await fileExists(backupPath))) await fs.rename(backupPath, productPath);
+        resetRawCache(userId);
+        throw err;
+      }
+
+      // 异步双写到历史库（与 /api/uploads/sources 一致；失败仅 log，不影响应用成功）
+      getRawSnapshot(userId)
+        .then((raw) => {
+          try {
+            const result = ingestUpload({
+              userId,
+              keepHistory: req.user.role === "admin",
+              product: raw.product || [],
+              adItem: raw.adItem || [],
+              content: raw.content || [],
+              keyword: raw.keyword || [],
+              crowd: raw.crowd || []
+            });
+            console.log(`[ba-merge] user ${userId} merged ${summary.fileCount} files → upload #${result.uploadId}, range ${result.dateMin} ~ ${result.dateMax}`);
+          } catch (err) {
+            console.error(`[ba-merge] user ${userId} ingest failed:`, err.message);
+          }
+        })
+        .catch((err) => console.error(`[ba-merge] user ${userId} snapshot failed:`, err.message));
+    }
+
+    res.json({ ok: true, summary, applied, downloadUrl: `/api/ba-merge/download/${jobId}`, meta });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 下载合并后的 .xlsx
+app.get("/api/ba-merge/download/:jobId", async (req, res, next) => {
+  const userId = req.user.id;
+  try {
+    const jobDir = baJobDir(userId, req.params.jobId);
+    const mergedPath = path.join(jobDir, "merged.xlsx");
+    if (!(await fileExists(mergedPath))) {
+      res.status(404).json({ error: "合并文件不存在或已过期，请重新合并" });
+      return;
+    }
+    let downloadName = "生意参谋商品全部_合并.xlsx";
+    try {
+      const result = JSON.parse(await fs.readFile(path.join(jobDir, "result.json"), "utf8"));
+      if (result.downloadName) downloadName = result.downloadName;
+    } catch {
+      /* 用默认名 */
+    }
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(downloadName)}`);
+    res.sendFile(mergedPath);
   } catch (error) {
     next(error);
   }

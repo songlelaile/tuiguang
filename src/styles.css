@@ -1105,3 +1105,74 @@ tbody tr:hover td {
     margin-right: 0;
   }
 }
+
+/* ===== 生意参谋多日表合并面板 ===== */
+.baHint {
+  margin: 2px 0 14px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: rgba(245, 240, 223, 0.7);
+}
+.baHint code {
+  background: rgba(245, 200, 119, 0.12);
+  color: #f5c877;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.historyExportRow input[type="text"] {
+  background: rgba(245, 240, 223, 0.05);
+  border: 1px solid rgba(245, 200, 119, 0.25);
+  color: #f5f0df;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  min-width: 200px;
+}
+.baReport {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 6px;
+}
+.baIssue {
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.6;
+  background: rgba(16, 20, 12, 0.45);
+  border-left: 3px solid rgba(245, 240, 223, 0.25);
+}
+.baIssue ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+.baIssue strong { color: #f5f0df; }
+.baIssueDanger { border-left-color: #e56e60; background: rgba(229, 110, 96, 0.1); }
+.baIssueDanger strong { color: #ffb3a8; }
+.baIssueWarn { border-left-color: #f5c877; background: rgba(245, 200, 119, 0.08); }
+.baIssueOk { border-left-color: #7ed4a6; background: rgba(126, 212, 166, 0.08); color: #bce6df; }
+.baInline { display: block; margin-top: 4px; color: rgba(245, 240, 223, 0.75); word-break: break-all; }
+.baDupRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+}
+.baDupDate {
+  min-width: 96px;
+  font-variant-numeric: tabular-nums;
+  color: #f5c877;
+}
+.baDupRow select {
+  flex: 1;
+  background: rgba(245, 240, 223, 0.05);
+  border: 1px solid rgba(245, 200, 119, 0.25);
+  color: #f5f0df;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 12px;
+}
+.baResultRow { padding-top: 4px; }
