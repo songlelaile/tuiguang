@@ -758,9 +758,18 @@ export function runHistoryMaintenance(defaultRetentionMonths = 0) {
     conn.pragma("wal_checkpoint(TRUNCATE)");
     const mode = conn.pragma("auto_vacuum", { simple: true });
     if (mode !== 2) {
-      const t0 = Date.now();
-      conn.exec("VACUUM"); // 一次性:转 incremental 模式 + 压实历史膨胀
-      console.log(`[history] 已 VACUUM(转 incremental + 压实),耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+      // 库还不是 incremental auto_vacuum 模式:转换需要一次全量 VACUUM。
+      // ⚠️ better-sqlite3 是同步 API,对 GB 级大库做 VACUUM 会把单进程事件循环卡死数分钟,
+      // 期间健康检查超时、整站 502/无响应(线上踩过:还原 10GB 库后开机维护触发全量 VACUUM 卡死)。
+      // 因此默认不在运行期做;确需压实时,由管理员在维护窗口(低峰/可短暂停服)显式开启:
+      //   HISTORY_ALLOW_FULL_VACUUM=1
+      if (process.env.HISTORY_ALLOW_FULL_VACUUM === "1") {
+        const t0 = Date.now();
+        conn.exec("VACUUM"); // 一次性:转 incremental 模式 + 压实历史膨胀
+        console.log(`[history] 已 VACUUM(转 incremental + 压实),耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+      } else {
+        console.log("[history] 跳过一次性全量 VACUUM(大库会阻塞单进程);需压实请在维护窗口设 HISTORY_ALLOW_FULL_VACUUM=1");
+      }
     } else {
       conn.pragma("incremental_vacuum");
     }
