@@ -892,7 +892,7 @@ async function buildProductViewRaw(userId, range = {}, injected = null) {
 
   // 全店推广花费：从推广商品报表 + 推广内容报表的"花费"按日期聚合
   // （product 表的"推广消耗"字段在生参排行榜里普遍为空，不能作为全店口径）
-  const adRows = filterRows([...adItem, ...content], range, "日期", ["主体名称", "计划名字", "场景名字"]);
+  const adRows = filterRows([...adItem, ...content], range, "日期", ["主体名称", "计划名字", "场景名字", "主体ID", "计划ID"]);
   const adSpendByDate = new Map();
   for (const row of adRows) {
     const date = parseDateText(row["日期"]);
@@ -912,7 +912,7 @@ async function buildProductViewRaw(userId, range = {}, injected = null) {
   const adItemSpendByItemAndDate = new Map();   // P0.1a 行下钻：按商品+日期细分
   // 同时收集主体名称用于补全 product 表里缺失的商品标题
   const adItemNameById = new Map();
-  const adItemRowsFiltered = filterRows(adItem, range, "日期", ["主体名称", "计划名字", "场景名字"]);
+  const adItemRowsFiltered = filterRows(adItem, range, "日期", ["主体名称", "计划名字", "场景名字", "主体ID", "计划ID"]);
   for (const row of adItemRowsFiltered) {
     if (row["主体类型"] !== "商品" || !row["主体ID"]) continue;
     const id = String(row["主体ID"]);
@@ -1146,7 +1146,7 @@ const adFields = ["花费", "总成交金额", "展现量", "点击量", "总成
 
 async function buildAdProductsViewRaw(userId, range = {}, injected = null) {
   const raw = injected || (await loadTables(userId, ["adItem", "content"]));
-  const rows = filterRows(adUnion(raw), range, "日期", ["主体名称", "计划名字", "场景名字"]);
+  const rows = filterRows(adUnion(raw), range, "日期", ["主体名称", "计划名字", "场景名字", "主体ID", "计划ID"]);
   const subjects = buildAdSubject(rows);
 
   const sceneGroups = new Map();
@@ -1213,7 +1213,7 @@ async function buildAdProductsViewRaw(userId, range = {}, injected = null) {
 
 async function buildKeywordViewRaw(userId, range = {}, injected = null) {
   const raw = injected || (await loadTables(userId, ["keyword"]));
-  const rows = filterRows(raw.keyword, range, "日期", ["词名字/词包名字", "宝贝名称", "计划名字"]);
+  const rows = filterRows(raw.keyword, range, "日期", ["词名字/词包名字", "宝贝名称", "计划名字", "宝贝ID", "词ID/词包ID", "计划ID", "单元ID"]);
   const groups = new Map();
   const wordGroups = new Map();
   const typeGroups = new Map();
@@ -1272,7 +1272,7 @@ async function buildKeywordViewRaw(userId, range = {}, injected = null) {
 
 async function buildCrowdViewRaw(userId, range = {}, injected = null) {
   const raw = injected || (await loadTables(userId, ["crowd"]));
-  const rows = filterRows(raw.crowd, range, "日期", ["人群名字", "主体名称", "单元名字", "场景名字"]);
+  const rows = filterRows(raw.crowd, range, "日期", ["人群名字", "主体名称", "单元名字", "场景名字", "主体ID", "计划ID", "单元ID"]);
   const groups = new Map();
   const sceneWords = new Map();
   const crowdWords = new Map();
@@ -1324,7 +1324,7 @@ async function buildCrowdViewRaw(userId, range = {}, injected = null) {
 
 async function buildContentViewRaw(userId, range = {}, injected = null) {
   const raw = injected || (await loadTables(userId, ["content"]));
-  const rows = filterRows(raw.content, range, "日期", ["主体名称", "计划名字", "主体类型"]);
+  const rows = filterRows(raw.content, range, "日期", ["主体名称", "计划名字", "主体类型", "主体ID", "计划ID"]);
   const groups = new Map();
   for (const row of rows) {
     const contentCode = `${row["主体类型"] || "内容"}${row["主体名称"] || "未命名内容"}`;

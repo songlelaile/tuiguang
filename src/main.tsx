@@ -526,7 +526,7 @@ function App({ auth }: { auth: AuthState }) {
             )}
             <label className="searchBox">
               <span>搜索</span>
-              <input value={filters.q} placeholder="商品 / 计划 / 人群 / 词" onChange={(event) => setFilters((prev) => ({ ...prev, q: event.target.value }))} />
+              <input value={filters.q} placeholder="商品 / 计划 / 人群 / 词 / ID" onChange={(event) => setFilters((prev) => ({ ...prev, q: event.target.value }))} />
             </label>
             {endpoints[active] && (
               <a
