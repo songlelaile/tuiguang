@@ -57,7 +57,9 @@ export const sourceUploadSlots = [
 //   3. 总行数预算 LRU 淘汰,硬性封顶常驻内存;
 //   4. 惰性 TTL,空闲数据过期后下次访问重载;
 //   5. 解析并发信号量,封顶瞬时解析峰值(并发多用户时不至于 N 份大文件同时解析撑爆)。
-const RAW_TTL_MS = Number(process.env.RAW_CACHE_TTL_MS || 5 * 60 * 1000);
+// 解析缓存存活时间:默认 24h(原 5min 太短,大文件空闲后会被重新解析)。
+// 源文件变更时由 resetRawCache 主动清,不依赖 TTL,所以放长很安全。
+const RAW_TTL_MS = Number(process.env.RAW_CACHE_TTL_MS || 24 * 60 * 60 * 1000);
 const RAW_ROW_BUDGET = Number(process.env.RAW_CACHE_ROW_BUDGET || 1_000_000);
 const RAW_PARSE_CONCURRENCY = Math.max(1, Number(process.env.RAW_PARSE_CONCURRENCY || 2));
 

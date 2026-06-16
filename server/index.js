@@ -793,6 +793,21 @@ function startServer() {
   app.listen(port, host, () => {
     const tag = cluster.isWorker ? `worker pid=${process.pid}` : "单进程";
     console.log(`huopan-bi-api listening on http://${host}:${port} (${tag})`);
+    // 启动后台预热:worker 提前解析源文件 + 构建各视图缓存,首个用户请求即命中,
+    // 避免冷启动 8~20s 等待。延迟 2s 让服务先稳。(预热在 worker 里跑,不阻塞主线程)
+    setTimeout(() => {
+      try {
+        const adminId = getFirstAdminId();
+        if (adminId) {
+          console.log(`[prewarm] 启动预热 user ${adminId} ...`);
+          prewarm(adminId)
+            .then(() => console.log(`[prewarm] user ${adminId} 完成`))
+            .catch((e) => console.error("[prewarm] 失败:", e.message));
+        }
+      } catch (e) {
+        console.error("[prewarm] 启动失败:", e.message);
+      }
+    }, 2000);
   });
 }
 
