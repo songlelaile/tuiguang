@@ -10,6 +10,12 @@ import cluster from "node:cluster";
 import multer from "multer";
 import XLSX from "xlsx";
 import {
+  getRootUploadDir,
+  getUploadedSourcePath,
+  sourceUploadSlots
+} from "./metrics.js";
+// 数据计算走 compute-worker(独占解析缓存,主线程不阻塞);同名签名,均返回 Promise
+import {
   buildAdProductsView,
   buildContentView,
   buildCrowdView,
@@ -17,18 +23,15 @@ import {
   buildMeta,
   buildProductView,
   clearSourceData,
-  getRawSnapshot,
-  getRootUploadDir,
-  getUploadedSourcePath,
   resetRawCache,
-  sourceUploadSlots
-} from "./metrics.js";
+  ingestCurrent,
+  prewarm
+} from "./compute-client.js";
 import {
   computeCompareRange,
   getCoverage,
   getDbHandle,
   getFirstAdminId,
-  ingestUpload,
   initDatabase,
   iterateTableRaw,
   listUploads,
@@ -294,31 +297,18 @@ app.post(
         moved.push({ id: slot.id, name: slot.name, file: targetPath });
       }
 
-      resetRawCache(userId);
+      await resetRawCache(userId);
       const meta = await buildMeta(userId);
       await Promise.all(backups.map((backup) => fs.rm(backup.backupPath, { force: true })));
 
-      // P1.2 异步双写到 SQLite 历史库;失败 log 不影响上传成功
-      getRawSnapshot(userId)
-        .then((raw) => {
-          try {
-            const result = ingestUpload({
-              userId,
-              // P4.14 普通用户覆盖式留存:非 admin 上传前先清掉其旧历史,只留最新一份;
-              // admin 保留全量历史(供跨周期对比 / 归档看板)。
-              keepHistory: req.user.role === "admin",
-              product: raw.product || [],
-              adItem: raw.adItem || [],
-              content: raw.content || [],
-              keyword: raw.keyword || [],
-              crowd: raw.crowd || []
-            });
-            console.log(`[history] user ${userId} upload #${result.uploadId} ingested, range ${result.dateMin} ~ ${result.dateMax}`);
-          } catch (err) {
-            console.error(`[history] user ${userId} ingest failed:`, err.message);
-          }
-        })
-        .catch((err) => console.error(`[history] user ${userId} snapshot failed:`, err.message));
+      // P1.2 异步双写到 SQLite 历史库(在 worker 内 getRawSnapshot + ingest,不回传全量数据);失败 log 不影响上传成功
+      // P4.14 普通用户覆盖式留存(非 admin 只留最新一份);admin 保留全量历史
+      ingestCurrent(userId, req.user.role === "admin")
+        .then((result) => console.log(`[history] user ${userId} upload #${result.uploadId} ingested, range ${result.dateMin} ~ ${result.dateMax}`))
+        .catch((err) => console.error(`[history] user ${userId} ingest failed:`, err.message));
+
+      // 后台预热各视图缓存(worker 内串行),用户随后切换视图即命中
+      prewarm(userId).catch(() => {});
 
       res.json({ ok: true, updated: moved, meta });
     } catch (error) {
@@ -328,7 +318,7 @@ app.post(
           await fs.rename(backup.backupPath, backup.targetPath);
         }
       }
-      resetRawCache(userId);
+      await resetRawCache(userId).catch(() => {});
       next(error);
     } finally {
       await Promise.all(receivedFiles.map((file) => fs.rm(file.path, { force: true })));
@@ -424,36 +414,21 @@ app.post("/api/ba-merge/apply", async (req, res, next) => {
       }
       try {
         await fs.writeFile(productPath, buffer);
-        resetRawCache(userId);
+        await resetRawCache(userId);
         meta = await buildMeta(userId);
         if (backupPath) await fs.rm(backupPath, { force: true });
         applied = true;
       } catch (err) {
         // 回滚到备份
         if (backupPath && (await fileExists(backupPath))) await fs.rename(backupPath, productPath);
-        resetRawCache(userId);
+        await resetRawCache(userId).catch(() => {});
         throw err;
       }
 
-      // 异步双写到历史库（与 /api/uploads/sources 一致；失败仅 log，不影响应用成功）
-      getRawSnapshot(userId)
-        .then((raw) => {
-          try {
-            const result = ingestUpload({
-              userId,
-              keepHistory: req.user.role === "admin",
-              product: raw.product || [],
-              adItem: raw.adItem || [],
-              content: raw.content || [],
-              keyword: raw.keyword || [],
-              crowd: raw.crowd || []
-            });
-            console.log(`[ba-merge] user ${userId} merged ${summary.fileCount} files → upload #${result.uploadId}, range ${result.dateMin} ~ ${result.dateMax}`);
-          } catch (err) {
-            console.error(`[ba-merge] user ${userId} ingest failed:`, err.message);
-          }
-        })
-        .catch((err) => console.error(`[ba-merge] user ${userId} snapshot failed:`, err.message));
+      // 异步双写到历史库（与 /api/uploads/sources 一致；worker 内完成,失败仅 log）
+      ingestCurrent(userId, req.user.role === "admin")
+        .then((result) => console.log(`[ba-merge] user ${userId} merged ${summary.fileCount} files → upload #${result.uploadId}, range ${result.dateMin} ~ ${result.dateMax}`))
+        .catch((err) => console.error(`[ba-merge] user ${userId} ingest failed:`, err.message));
     }
 
     res.json({ ok: true, summary, applied, downloadUrl: `/api/ba-merge/download/${jobId}`, meta });
