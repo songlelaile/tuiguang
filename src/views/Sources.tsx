@@ -572,11 +572,14 @@ export default function SourcesView({ meta, onMetaChange }: { meta: Meta | null;
         <div className="uploadGrid">
           {sourceUploadSlots.map((slot) => {
             const file = files[slot.id];
+            const src = meta?.sources?.find((s) => s.id === slot.id);
+            // 已接入状态:已选新文件优先显示文件名;否则展示该源表当前库内状态(合并应用 / 手动上传成功后同步)
+            const filled = !file && Boolean(src && (src.mode === "uploaded" || src.uploaded));
             return (
-              <label key={`${slot.id}-${inputKey}`} className="uploadSlot">
-                <span>{slot.label}</span>
-                <strong>{file?.name || "选择文件"}</strong>
-                <em>{slot.hint}</em>
+              <label key={`${slot.id}-${inputKey}`} className={`uploadSlot${filled ? " uploadSlotFilled" : ""}`}>
+                <span>{slot.label}{filled && <i className="slotBadge">已接入</i>}</span>
+                <strong>{file?.name || (filled ? `${fmtInt(src!.rows)} 行` : "选择文件")}</strong>
+                <em>{file ? slot.hint : filled ? `${src!.start || "—"} ~ ${src!.end || "—"}` : slot.hint}</em>
                 <input
                   type="file"
                   accept={slot.accept}
