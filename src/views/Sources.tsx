@@ -559,6 +559,8 @@ export default function SourcesView({ meta, onMetaChange }: { meta: Meta | null;
 
   return (
     <section className="viewStack">
+      {/* 工作动线:先「多日汇总合并」→ 校验无误后自动同步给下方「商品维度」源表 */}
+      <BusinessAdvisorMergePanel onMetaChange={onMetaChange} />
       <div className="panel">
         <div className="panelHeader">
           <div>
@@ -597,7 +599,6 @@ export default function SourcesView({ meta, onMetaChange }: { meta: Meta | null;
         </div>
         {message && <div className="uploadNotice">{message}</div>}
       </div>
-      <BusinessAdvisorMergePanel onMetaChange={onMetaChange} />
       <div className="panel">
         <div className="panelHeader">
           <div>
