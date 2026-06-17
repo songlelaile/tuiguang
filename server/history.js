@@ -56,7 +56,26 @@ function ensureDb() {
   }
 
   initBusinessSchema(db);
+  migrateKeywordKeyV2(db);
   return db;
+}
+
+// 一次性迁移:keyword 的 word_key 从"名称键"升级为"ID 键"(修主键塌缩 bug)。
+// 新旧键不同,旧行会与新 ingest 并存重复 → 清空 keyword,下次上传按新键重建(更准确)。
+// 用 settings 标志守护,只跑一次。
+function migrateKeywordKeyV2(db) {
+  try {
+    const done = db.prepare("SELECT value FROM settings WHERE key = 'schema_kw_key_v2'").get();
+    if (done) return;
+    const n = db.prepare("SELECT count(*) c FROM keyword").get().c;
+    db.exec("DELETE FROM keyword");
+    db.prepare(
+      "INSERT INTO settings(key, value) VALUES ('schema_kw_key_v2', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+    ).run(new Date().toISOString());
+    console.log(`[migrate] keyword word_key 升级为 ID 键,已清空旧 keyword ${n} 行(下次上传重建)`);
+  } catch (e) {
+    console.error("[migrate] keyword 迁移失败(忽略):", e.message);
+  }
 }
 
 export function getLegacyMigratedAdminId() {
@@ -400,10 +419,14 @@ function ingestKeyword(conn, userId, rows, uploadId, uploadedAt) {
     const wordType = str(row["词类型"]);
     if (!date || !wordName) continue;
     const itemKey = str(row["宝贝名称"]) || str(row["宝贝ID"]) || str(row["商品ID"]) || "";
+    // 修复主键塌缩:原 word_key=词类型|词名|宝贝 粒度太粗,同词同宝贝但不同单元/场景的多行
+    // 会撞主键被覆盖、丢花费(实测丢 ~0.3%)。改用 词ID/词包ID|单元ID|场景ID(实测 0 塌缩),
+    // 无词ID 时回退名称键。word_key 仅用于行唯一性;视图分组仍按 word_type/word_name/item_id 列。
+    const wordId = str(row["词ID/词包ID"]) || `${wordType}|${wordName}|${itemKey}`;
     stmt.run({
       user_id: userId,
       date,
-      word_key: `${wordType || ""}|${wordName}|${itemKey}`,
+      word_key: `${wordId}|${str(row["单元ID"])}|${str(row["场景ID"])}`,
       plan_id: str(row["计划ID"]) || "0",
       word_type: wordType,
       word_name: wordName,
