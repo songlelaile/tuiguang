@@ -913,7 +913,7 @@ function AdProductsView({ data }: { data: AnyRecord }) {
             <p className="eyebrow">图表-推广商品分析表</p>
             <h2>推广计划明细</h2>
           </div>
-          <span className="pill">共 {fmtInt(planTable.length)} 条数据</span>
+          <span className="pill">共 {fmtInt(summary.plans)} 个计划{Number(summary.shownPlans) < Number(summary.plans) ? `,按花费展示前 ${fmtInt(summary.shownPlans)}` : ""}</span>
         </div>
         <DataTable
           rows={planTable}
@@ -983,7 +983,7 @@ function KeywordView({ data }: { data: AnyRecord }) {
             <p className="eyebrow">图表-推广关键词分析表</p>
             <h2>关键词明细</h2>
           </div>
-          <span className="pill">共 {fmtInt(table.length)} 条数据</span>
+          <span className="pill">共 {fmtInt(summary.totalGroups ?? table.length)} 组{Number(summary.shownGroups ?? table.length) < Number(summary.totalGroups ?? table.length) ? `,按花费展示前 ${fmtInt(summary.shownGroups)}` : ""}</span>
         </div>
         <DataTable
           rows={table}

@@ -1182,20 +1182,26 @@ async function buildAdProductsViewRaw(userId, range = {}, injected = null) {
       accumulateAdDailyRow(target, row);
     });
   }
-  const planTable = [...planGroups.values()].map((row) => {
+  // 性能:计划组可达上万,全量 planTable(每组含 daily)payload 大、前端渲染卡。
+  // 只返回按花费排序的 top-N;subjects(treemap/summary 用)仍全量,数字不变。
+  const TOP_N = Number(range.topN) > 0 ? Math.min(Number(range.topN), 5000) : 1000;
+  const allPlans = [...planGroups.values()];
+  const totalPlans = allPlans.length;
+  allPlans.sort((a, b) => cleanNumber(b["花费"]) - cleanNumber(a["花费"]));
+  const planTable = allPlans.slice(0, TOP_N).map((row) => {
     const daily = flushAdDailyByDate(row);
     enrichAdMetrics(row);
     row.daily = daily;
     return row;
   });
-  sortBy(planTable, "spend");
 
   const totalSpend = subjects.reduce((sum, row) => sum + cleanNumber(row.spend), 0);
   return {
     summary: {
       rows: rows.length,
       subjects: subjects.length,
-      plans: planTable.length,
+      plans: totalPlans,
+      shownPlans: planTable.length,
       totalSpend: round(totalSpend, 2),
       totalGmv: round(subjects.reduce((sum, row) => sum + cleanNumber(row.gmv), 0), 2),
       roi: round(div(subjects.reduce((sum, row) => sum + cleanNumber(row.gmv), 0), totalSpend), 4)
@@ -1237,14 +1243,22 @@ async function buildKeywordViewRaw(userId, range = {}, injected = null) {
     });
   }
 
-  const table = [...groups.values()].map((row) => {
+  // 性能:keyword 常有 5万+ 组,全量 table(每组含 daily)会产出 ~26MB JSON、前端渲染几万行卡死。
+  // 只对【按花费排序的 top-N 组】做 enrich + flush daily 并返回;
+  // summary/wordCloud/typePie 仍基于全量(数字不变),bubble 取 top-120(原本也是)。
+  const TOP_N = Number(range.topN) > 0 ? Math.min(Number(range.topN), 5000) : 1000;
+  const allGroups = [...groups.values()];
+  const totalGroups = allGroups.length;
+  const totalSpend = allGroups.reduce((sum, row) => sum + cleanNumber(row["花费"]), 0);
+  allGroups.sort((a, b) => cleanNumber(b["花费"]) - cleanNumber(a["花费"]));
+  const table = allGroups.slice(0, TOP_N).map((row) => {
     const daily = flushAdDailyByDate(row);
     enrichAdMetrics(row);
     row.avgRank = round(div(row.rankWeighted, row["展现量"]), 4);
     row.daily = daily;
     return row;
   });
-  sortBy(table, "spend");
+  // table 已按花费降序,bubble 直接取前 120
 
   const dayGroups = new Map();
   for (const row of rows) {
@@ -1257,8 +1271,10 @@ async function buildKeywordViewRaw(userId, range = {}, injected = null) {
   return {
     summary: {
       rows: rows.length,
-      groups: table.length,
-      totalSpend: round(table.reduce((sum, row) => sum + cleanNumber(row.spend), 0), 2)
+      groups: totalGroups,
+      totalGroups,
+      shownGroups: table.length,
+      totalSpend: round(totalSpend, 2)
     },
     wordCloud: sortBy([...wordGroups.values()], "value").slice(0, 160),
     typePie: sortBy([...typeGroups.values()], "value"),
