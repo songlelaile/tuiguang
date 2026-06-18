@@ -1065,10 +1065,15 @@ async function buildProductViewRaw(userId, range = {}, injected = null) {
   // 检测窗口 = 该日的前 7 日均值；偏离 > 阈值即标 flag
   detectProductDailyAnomalies(daily);
 
+  // 性能:明细表(每商品含daily)是 payload 主体,只返回按支付额 top-N;
+  // summary/treemap/weekly/daily 仍基于全量,数字不变。
+  const TOP_N = Number(range.topN) > 0 ? Math.min(Number(range.topN), 5000) : 1000;
   return {
     summary: {
       rows: rows.length,
       groups: table.length,
+      totalGroups: table.length,
+      shownGroups: Math.min(TOP_N, table.length),
       promotedItemCount,
       totalPay: round(totalPay, 2),
       totalRefund: round(totalRefund, 2),
@@ -1084,7 +1089,7 @@ async function buildProductViewRaw(userId, range = {}, injected = null) {
     treemap,
     weekly,
     daily,
-    table
+    table: table.slice(0, TOP_N)
   };
 }
 
@@ -1327,16 +1332,19 @@ async function buildCrowdViewRaw(userId, range = {}, injected = null) {
   }
   const daily = [...dayGroups.values()].map(enrichAdMetrics).sort((a, b) => String(a.sortKey).localeCompare(String(b.sortKey)));
 
+  const TOP_N = Number(range.topN) > 0 ? Math.min(Number(range.topN), 5000) : 1000;
   return {
     summary: {
       rows: rows.length,
       groups: table.length,
+      totalGroups: table.length,
+      shownGroups: Math.min(TOP_N, table.length),
       totalSpend: round(table.reduce((sum, row) => sum + cleanNumber(row.spend), 0), 2)
     },
     sceneWords: sortBy([...sceneWords.values()], "value"),
     crowdWords: sortBy([...crowdWords.values()], "value").slice(0, 120),
     daily,
-    table
+    table: table.slice(0, TOP_N)
   };
 }
 
@@ -1367,10 +1375,13 @@ async function buildContentViewRaw(userId, range = {}, injected = null) {
   }
   const daily = [...dayGroups.values()].map(enrichAdMetrics).sort((a, b) => String(a.sortKey).localeCompare(String(b.sortKey)));
 
+  const TOP_N = Number(range.topN) > 0 ? Math.min(Number(range.topN), 5000) : 1000;
   return {
     summary: {
       rows: rows.length,
       groups: table.length,
+      totalGroups: table.length,
+      shownGroups: Math.min(TOP_N, table.length),
       totalSpend: round(table.reduce((sum, row) => sum + cleanNumber(row.spend), 0), 2)
     },
     treemap: table.map((row) => ({
@@ -1379,6 +1390,6 @@ async function buildContentViewRaw(userId, range = {}, injected = null) {
       roi: row.roi
     })),
     daily,
-    table
+    table: table.slice(0, TOP_N)
   };
 }

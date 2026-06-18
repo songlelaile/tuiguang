@@ -796,7 +796,7 @@ function ProductView({ data }: { data: AnyRecord }) {
             <p className="eyebrow">图表-商品维度分析表</p>
             <h2>商品经营明细</h2>
           </div>
-          <span className="pill">共 {fmtInt(table.length)} 条数据</span>
+          <span className="pill">共 {fmtInt(summary.totalGroups ?? table.length)} 个商品{Number(summary.shownGroups ?? table.length) < Number(summary.totalGroups ?? table.length) ? `,按支付额展示前 ${fmtInt(summary.shownGroups)}` : ""}</span>
         </div>
         <DataTable
           rows={table}
