@@ -128,7 +128,14 @@ async function tablesSignature(uid, ids) {
 // 包住一个 view builder:命中缓存直接返回;否则跑 build()、缓存产物、按字节 LRU 淘汰
 async function cachedView(uid, view, range, depTables, build) {
   const sig = await tablesSignature(uid, depTables);
-  const key = JSON.stringify([uid, view, range || {}, sig]);
+  // 归一化 range 作缓存键:剔除空/缺省字段,让预热的 {} 与前端请求的 {start:"",end:"",scene:"",q:""}
+  // 命中【同一条】缓存(否则预热永远命中不到,每次无筛选请求都重算 1-4s)。
+  const r = range || {};
+  const normRange = {};
+  for (const k of ["start", "end", "scene", "q", "topN"]) {
+    if (r[k] !== undefined && r[k] !== null && r[k] !== "") normRange[k] = r[k];
+  }
+  const key = JSON.stringify([uid, view, normRange, sig]);
   const hit = resultCache.get(key);
   if (hit) {
     hit.lastAccess = Date.now();
