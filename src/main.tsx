@@ -334,11 +334,13 @@ type Filters = {
   q: string;
 };
 
-function useApi<T>(active: ViewKey, filters: Filters) {
+function useApi<T>(active: ViewKey, filters: Filters, dataVersion?: unknown) {
   const [data, setData] = React.useState<T | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState("");
   const prevActiveRef = React.useRef<ViewKey>(active);
+  // 客户端缓存:看过的"视图+筛选"切回去秒显、不再请求。上限 24 条(每条结果较大,防内存膨胀)。
+  const cacheRef = React.useRef<Map<string, T>>(new Map());
 
   // 搜索词防抖 350ms:输入时不每键发请求(每键都会触发后端对几十万行重算)
   const [debouncedQ, setDebouncedQ] = React.useState(filters.q);
@@ -347,11 +349,26 @@ function useApi<T>(active: ViewKey, filters: Filters) {
     return () => clearTimeout(id);
   }, [filters.q]);
 
+  // 数据版本变化(上传/清空源数据 → meta 引用变)→ 清空客户端缓存,避免切回去显示旧数据
+  React.useEffect(() => {
+    cacheRef.current.clear();
+  }, [dataVersion]);
+
   React.useEffect(() => {
     const endpoint = endpoints[active];
     if (!endpoint) {
       setData(null);
       setError("");
+      return;
+    }
+    const key = `${active}|${filters.start}|${filters.end}|${filters.scene}|${debouncedQ}`;
+    const hit = cacheRef.current.get(key);
+    if (hit) {
+      // 命中客户端缓存:秒显,不发请求、不转圈
+      setData(hit);
+      setError("");
+      setLoading(false);
+      prevActiveRef.current = active;
       return;
     }
     let cancelled = false;
@@ -369,7 +386,12 @@ function useApi<T>(active: ViewKey, filters: Filters) {
         return res.json();
       })
       .then((json) => {
-        if (!cancelled) setData(json);
+        if (!cancelled) {
+          const cache = cacheRef.current;
+          cache.set(key, json);
+          if (cache.size > 24) cache.delete(cache.keys().next().value); // 淘汰最旧一条
+          setData(json);
+        }
       })
       .catch((err: Error) => {
         if (!cancelled) setError(err.message);
@@ -413,7 +435,7 @@ function App({ auth }: { auth: AuthState }) {
   const [filters, setFilters] = React.useState<Filters>({ start: "", end: "", scene: "", q: "" });
   const [meta, setMeta] = React.useState<Meta | null>(null);
   // useApi 内部对 endpoints[active] 不存在的 view (sources / admin) 会短路,不发请求
-  const { data, loading, error } = useApi<Record<string, unknown>>(active, filters);
+  const { data, loading, error } = useApi<Record<string, unknown>>(active, filters, meta);
 
   // 守卫:非 admin 闯入 #admin → 弹回商品页
   React.useEffect(() => {
