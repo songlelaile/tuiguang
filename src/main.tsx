@@ -338,6 +338,14 @@ function useApi<T>(active: ViewKey, filters: Filters) {
   const [data, setData] = React.useState<T | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState("");
+  const prevActiveRef = React.useRef<ViewKey>(active);
+
+  // 搜索词防抖 350ms:输入时不每键发请求(每键都会触发后端对几十万行重算)
+  const [debouncedQ, setDebouncedQ] = React.useState(filters.q);
+  React.useEffect(() => {
+    const id = setTimeout(() => setDebouncedQ(filters.q), 350);
+    return () => clearTimeout(id);
+  }, [filters.q]);
 
   React.useEffect(() => {
     const endpoint = endpoints[active];
@@ -347,10 +355,13 @@ function useApi<T>(active: ViewKey, filters: Filters) {
       return;
     }
     let cancelled = false;
+    // 切换视图(数据结构不同)必须清空;同视图改筛选则保留旧数据,
+    // 加载完再替换 → 消除"空白闪烁",体感更顺(stale-while-revalidate)
+    if (prevActiveRef.current !== active) setData(null);
+    prevActiveRef.current = active;
     setLoading(true);
     setError("");
-    setData(null);
-    fetch(`${endpoint}${buildQuery(filters)}`)
+    fetch(`${endpoint}${buildQuery({ ...filters, q: debouncedQ })}`)
       .then(async (res) => {
         // readApiError 兜底空 body 的 5xx,避免直接 res.json() 抛
         // "Unexpected end of JSON input"(后端进程挂掉时代理回的空 500)
@@ -369,7 +380,7 @@ function useApi<T>(active: ViewKey, filters: Filters) {
     return () => {
       cancelled = true;
     };
-  }, [active, filters.start, filters.end, filters.scene, filters.q]);
+  }, [active, filters.start, filters.end, filters.scene, debouncedQ]);
 
   return { data, loading, error };
 }
