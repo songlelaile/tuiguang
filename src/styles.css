@@ -593,3 +593,608 @@ tbody tr:hover td {
     flex-direction: column;
   }
 }
+
+.timeline {
+  margin: 8px 0 18px;
+  padding: 14px 16px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(245, 200, 119, 0.18);
+  background: rgba(245, 200, 119, 0.04);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.timeline.timeline-ok {
+  border-color: rgba(120, 200, 130, 0.32);
+  background: rgba(120, 200, 130, 0.06);
+}
+.timeline.timeline-warn {
+  border-color: rgba(245, 200, 119, 0.42);
+  background: rgba(245, 200, 119, 0.07);
+}
+.timeline.timeline-danger {
+  border-color: rgba(229, 110, 96, 0.45);
+  background: rgba(229, 110, 96, 0.08);
+}
+.timeline.timeline-muted,
+.timeline.timelineEmpty {
+  border-color: rgba(245, 240, 223, 0.18);
+  background: rgba(245, 240, 223, 0.03);
+}
+
+.timelineHeader {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.timelineBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: rgba(245, 240, 223, 0.06);
+  color: #f5f0df;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+}
+.timelineBadge.ok {
+  color: #c1e8c4;
+  border-color: rgba(120, 200, 130, 0.6);
+  background: rgba(120, 200, 130, 0.18);
+}
+.timelineBadge.warn {
+  color: #f5d27d;
+  border-color: rgba(245, 200, 119, 0.65);
+  background: rgba(245, 200, 119, 0.18);
+}
+.timelineBadge.danger {
+  color: #f5b6ad;
+  border-color: rgba(229, 110, 96, 0.65);
+  background: rgba(229, 110, 96, 0.18);
+}
+.timelineBadge.muted {
+  color: #d8d2bd;
+  border-color: rgba(245, 240, 223, 0.32);
+  background: rgba(245, 240, 223, 0.08);
+}
+
+.timelineBadgeCount {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(16, 20, 12, 0.55);
+  color: inherit;
+  font-size: 11px;
+}
+
+.timelineHeaderText {
+  color: rgba(245, 240, 223, 0.78);
+  font-size: 13px;
+}
+
+.timelineRows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.timelineRow {
+  display: grid;
+  grid-template-columns: 92px 1fr 180px;
+  align-items: center;
+  gap: 12px;
+}
+
+.timelineLabel {
+  font-size: 12px;
+  color: rgba(245, 240, 223, 0.78);
+}
+
+.timelineTrack {
+  position: relative;
+  height: 12px;
+  border-radius: 6px;
+  background: rgba(245, 240, 223, 0.05);
+  overflow: hidden;
+}
+
+.timelineSpan {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(245, 200, 119, 0.32);
+  border-radius: 4px;
+}
+
+.timelineSpanEmpty {
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(245, 240, 223, 0.06),
+    rgba(245, 240, 223, 0.06) 4px,
+    transparent 4px,
+    transparent 8px
+  );
+  left: 0;
+  right: 0;
+}
+
+.timelineIntersect {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: rgba(120, 200, 130, 0.55);
+  border-radius: 4px;
+  box-shadow: 0 0 0 1px rgba(120, 200, 130, 0.4) inset;
+}
+
+.timelineRange {
+  font-size: 11px;
+  color: rgba(245, 240, 223, 0.6);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.timelineAxis {
+  display: flex;
+  justify-content: space-between;
+  margin-left: 104px;
+  margin-right: 192px;
+  font-size: 11px;
+  color: rgba(245, 240, 223, 0.45);
+  font-variant-numeric: tabular-nums;
+}
+
+.timelineWarnings {
+  margin: 4px 0 0;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: rgba(16, 20, 12, 0.45);
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: rgba(245, 240, 223, 0.88);
+}
+
+.timelineWarnings li::before {
+  content: "·";
+  display: inline-block;
+  margin-right: 6px;
+  color: rgba(245, 200, 119, 0.7);
+}
+
+.timelineWarningsEmpty {
+  color: rgba(245, 240, 223, 0.65);
+  font-style: italic;
+}
+
+/* DataTable 行展开 */
+.tableWrap th.expandColumn,
+.tableWrap td.expandColumn {
+  width: 36px;
+  text-align: center;
+  padding-left: 4px;
+  padding-right: 4px;
+}
+
+.expandToggle {
+  background: transparent;
+  border: 1px solid rgba(245, 200, 119, 0.32);
+  color: #f5c877;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.16s ease, background-color 0.16s ease;
+}
+
+.expandToggle:hover {
+  background: rgba(245, 200, 119, 0.14);
+}
+
+.expandToggle.open {
+  transform: rotate(90deg);
+  background: rgba(245, 200, 119, 0.22);
+  border-color: rgba(245, 200, 119, 0.6);
+}
+
+.expandPlaceholder {
+  color: rgba(245, 240, 223, 0.18);
+  font-size: 14px;
+}
+
+.tableWrap tr.rowOpen td {
+  background: rgba(245, 200, 119, 0.06);
+}
+
+.tableWrap tr.expandRow > td {
+  padding: 16px 20px 18px;
+  background: rgba(16, 20, 12, 0.55);
+  border-bottom: 1px solid rgba(245, 200, 119, 0.18);
+}
+
+.expandPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.expandPanelTitle {
+  font-size: 13px;
+  color: rgba(245, 240, 223, 0.75);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.expandPanelTitle strong {
+  color: #f5c877;
+  font-size: 14px;
+}
+
+.expandPanelMeta {
+  font-size: 11px;
+  color: rgba(245, 240, 223, 0.5);
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.expandPanelMeta span strong {
+  color: #f5f0df;
+  margin-left: 4px;
+}
+
+.exportButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1px solid rgba(245, 200, 119, 0.45);
+  border-radius: 8px;
+  background: rgba(245, 200, 119, 0.08);
+  color: #f5c877;
+  font-size: 13px;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background-color 0.16s ease, transform 0.06s ease;
+  white-space: nowrap;
+}
+
+.exportButton::before {
+  content: "⬇";
+  font-size: 14px;
+  line-height: 1;
+}
+
+.exportButton:hover {
+  background: rgba(245, 200, 119, 0.18);
+}
+
+.exportButton:active {
+  transform: translateY(1px);
+}
+
+/* DrillChart 时间窗口 + 对比工具栏 */
+.drillChartWrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.drillToolbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 6px 0 2px;
+  border-bottom: 1px dashed rgba(245, 200, 119, 0.12);
+}
+
+.drillWindowGroup {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  background: rgba(245, 240, 223, 0.05);
+  border-radius: 8px;
+}
+
+.drillWindowBtn {
+  background: transparent;
+  border: 0;
+  padding: 5px 12px;
+  border-radius: 6px;
+  color: rgba(245, 240, 223, 0.7);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color 0.14s, color 0.14s;
+}
+
+.drillWindowBtn:hover {
+  color: #f5f0df;
+}
+
+.drillWindowBtn.active {
+  background: rgba(245, 200, 119, 0.22);
+  color: #f5c877;
+}
+
+.drillCompareToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: rgba(245, 240, 223, 0.78);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.drillCompareToggle.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.drillCompareToggle input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: #f5c877;
+  cursor: pointer;
+}
+
+.drillCompareToggle.disabled input[type="checkbox"] {
+  cursor: not-allowed;
+}
+
+.drillCompareSelector {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: rgba(245, 240, 223, 0.78);
+  font-size: 12px;
+}
+
+.drillCompareLabel {
+  font-size: 12px;
+  color: rgba(245, 240, 223, 0.6);
+}
+
+.drillCompareSelect {
+  background: rgba(245, 240, 223, 0.05);
+  color: #f5f0df;
+  border: 1px solid rgba(245, 200, 119, 0.25);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  color-scheme: dark;
+}
+
+.drillCompareSelect:hover { border-color: rgba(245, 200, 119, 0.5); }
+
+.drillCompareHint {
+  font-size: 11px;
+  color: rgba(245, 240, 223, 0.5);
+  font-style: italic;
+}
+
+.drillCompareHint.warn {
+  color: #f5d27d;
+}
+
+/* P3.1 多指标叠加 chip group */
+.drillExtrasRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 4px 0 8px;
+}
+
+.drillExtrasLabel {
+  font-size: 12px;
+  color: rgba(245, 240, 223, 0.6);
+  margin-right: 4px;
+}
+
+.drillExtrasChip {
+  background: transparent;
+  border: 1px solid rgba(245, 240, 223, 0.22);
+  color: rgba(245, 240, 223, 0.7);
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background-color 0.14s, border-color 0.14s, color 0.14s;
+}
+
+.drillExtrasChip:hover {
+  border-color: rgba(245, 240, 223, 0.45);
+  color: #f5f0df;
+}
+
+.drillExtrasChip.active {
+  font-weight: 600;
+}
+
+/* P2.4 历史归档下载 */
+.historyMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  background: rgba(245, 200, 119, 0.05);
+  border: 1px solid rgba(245, 200, 119, 0.18);
+  border-radius: 8px;
+  font-size: 12px;
+  color: rgba(245, 240, 223, 0.78);
+  font-variant-numeric: tabular-nums;
+}
+
+.historyMeta strong {
+  color: #f5c877;
+  margin-left: 4px;
+}
+
+.historyExportRow {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 6px 0 12px;
+}
+
+.historyExportRow label {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: rgba(245, 240, 223, 0.7);
+}
+
+.historyExportRow input[type="date"] {
+  background: rgba(245, 240, 223, 0.05);
+  border: 1px solid rgba(245, 200, 119, 0.25);
+  color: #f5f0df;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  color-scheme: dark;
+}
+
+.historyExportRow input[type="date"]:hover {
+  border-color: rgba(245, 200, 119, 0.5);
+}
+
+.historyHint {
+  font-size: 11px;
+  color: rgba(245, 240, 223, 0.5);
+  font-style: italic;
+}
+
+@media (max-width: 960px) {
+  .timelineRow {
+    grid-template-columns: 80px 1fr;
+  }
+  .timelineRange {
+    grid-column: 2 / 3;
+    text-align: left;
+    padding-left: 0;
+  }
+  .timelineAxis {
+    margin-left: 92px;
+    margin-right: 0;
+  }
+}
+
+/* ===== 生意参谋多日表合并面板 ===== */
+.baHint {
+  margin: 2px 0 14px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: rgba(245, 240, 223, 0.7);
+}
+.baHint code {
+  background: rgba(245, 200, 119, 0.12);
+  color: #f5c877;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.historyExportRow input[type="text"] {
+  background: rgba(245, 240, 223, 0.05);
+  border: 1px solid rgba(245, 200, 119, 0.25);
+  color: #f5f0df;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 13px;
+  min-width: 200px;
+}
+.baReport {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 6px;
+}
+.baIssue {
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.6;
+  background: rgba(16, 20, 12, 0.45);
+  border-left: 3px solid rgba(245, 240, 223, 0.25);
+}
+.baIssue ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+.baIssue strong { color: #f5f0df; }
+.baIssueDanger { border-left-color: #e56e60; background: rgba(229, 110, 96, 0.1); }
+.baIssueDanger strong { color: #ffb3a8; }
+.baIssueWarn { border-left-color: #f5c877; background: rgba(245, 200, 119, 0.08); }
+.baIssueOk { border-left-color: #7ed4a6; background: rgba(126, 212, 166, 0.08); color: #bce6df; }
+.baInline { display: block; margin-top: 4px; color: rgba(245, 240, 223, 0.75); word-break: break-all; }
+.baDupRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+}
+.baDupDate {
+  min-width: 96px;
+  font-variant-numeric: tabular-nums;
+  color: #f5c877;
+}
+.baDupRow select {
+  flex: 1;
+  background: rgba(245, 240, 223, 0.05);
+  border: 1px solid rgba(245, 200, 119, 0.25);
+  color: #f5f0df;
+  padding: 5px 8px;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 12px;
+}
+.baResultRow { padding-top: 4px; }
+
+/* 上传槽位:已接入状态(合并应用 / 手动上传成功后同步显示) */
+.uploadSlotFilled {
+  border-style: solid;
+  border-color: rgba(126, 212, 166, 0.5);
+  background: rgba(126, 212, 166, 0.07);
+}
+.uploadSlotFilled:hover {
+  border-color: rgba(126, 212, 166, 0.7);
+  background: rgba(126, 212, 166, 0.12);
+}
+.uploadSlotFilled strong { color: #bce6df; }
+.slotBadge {
+  font-style: normal;
+  margin-left: 6px;
+  font-size: 11px;
+  color: #7ed4a6;
+  border: 1px solid rgba(126, 212, 166, 0.45);
+  border-radius: 4px;
+  padding: 0 5px;
+  vertical-align: middle;
+}

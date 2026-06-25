@@ -7,30 +7,28 @@ import { DataTable, type ColumnDef } from "./ui/DataTable";
 import { MetricCard } from "./ui/MetricCard";
 import { WeeklyMatrix, type WeeklyMetric } from "./ui/WeeklyMatrix";
 import { fmtInt, fmtMoney, fmtNumber, fmtPercent } from "./utils/format";
+import { readApiError } from "./lib/api";
 
-type ViewKey = "product" | "ad-products" | "keywords" | "crowds" | "contents" | "sources";
+// P4.6 账号系统拆出来,单独 chunk
+//   - LoginView / RegisterView 跟着主 bundle(未登录用户首屏就要)
+//   - AdminView 用 React.lazy,只有 admin 点"管理"才下载
+import { LoginView, RegisterView } from "./auth/AuthPages";
+import { logout, useAuth } from "./auth/useAuth";
+import type { AuthState } from "./auth/shared";
+import type { Meta } from "./types/sources";
+import { LazyView, lazyWithRetry } from "./components/LazyBoundary";
 
-type MetaSource = {
-  id: string;
-  name: string;
-  file: string;
-  rows: number;
-  dateField: string;
-  start: string;
-  end: string;
-  uploaded?: boolean;
-  mode?: "default" | "uploaded" | "empty";
-  cleared?: boolean;
+// P4.6/4.7 lazy chunk;P4.8 加 retry + ErrorBoundary;P4.9 加 nav hover 时的 prefetch
+const AdminView = lazyWithRetry(() => import("./auth/AdminView"));
+const SourcesView = lazyWithRetry(() => import("./views/Sources"));
+
+// nav 鼠标 hover 就开始下载,等用户真正点击时 chunk 已经在浏览器 cache 里
+const prefetchers: Partial<Record<string, () => void>> = {
+  admin: () => { import("./auth/AdminView"); },
+  sources: () => { import("./views/Sources"); }
 };
 
-type Meta = {
-  dataDir: string;
-  uploadDir?: string;
-  sourceDataCleared?: boolean;
-  sources: MetaSource[];
-  scenes: string[];
-  scenesByView?: Partial<Record<ViewKey, string[]>>;
-};
+type ViewKey = "product" | "ad-products" | "keywords" | "crowds" | "contents" | "sources" | "admin";
 
 type AnyRecord = Record<string, unknown>;
 type ProductDrilldown = "payDaily" | "netFeeDaily";
@@ -39,21 +37,14 @@ type KeywordDrilldown = "spendDaily";
 type CrowdDrilldown = "spendDaily";
 type ContentDrilldown = "spendDaily";
 
-const navItems: Array<{ key: ViewKey; label: string; icon: React.ComponentType<{ size?: number }> }> = [
+const navItems: Array<{ key: ViewKey; label: string; icon: React.ComponentType<{ size?: number }>; adminOnly?: boolean }> = [
   { key: "product", label: "商品维度分析", icon: Boxes },
   { key: "ad-products", label: "推广商品分析", icon: Megaphone },
   { key: "keywords", label: "推广关键词分析", icon: Search },
   { key: "crowds", label: "推广人群分析", icon: Users },
   { key: "contents", label: "推广内容分析", icon: WandSparkles },
-  { key: "sources", label: "源数据", icon: FileSpreadsheet }
-];
-
-const sourceUploadSlots = [
-  { id: "product", label: "商品维度", accept: ".xlsx,.xls", hint: "XLSX / XLS" },
-  { id: "adItem", label: "推广商品", accept: ".csv", hint: "CSV" },
-  { id: "keyword", label: "推广关键词", accept: ".csv", hint: "CSV" },
-  { id: "crowd", label: "推广人群", accept: ".csv", hint: "CSV" },
-  { id: "content", label: "推广内容", accept: ".csv", hint: "CSV" }
+  { key: "sources", label: "源数据", icon: FileSpreadsheet },
+  { key: "admin", label: "管理", icon: Brain, adminOnly: true }
 ];
 
 const endpoints: Partial<Record<ViewKey, string>> = {
@@ -67,6 +58,249 @@ const endpoints: Partial<Record<ViewKey, string>> = {
 function viewFromHash(): ViewKey {
   const key = window.location.hash.replace(/^#\/?/, "");
   return navItems.some((item) => item.key === key) ? (key as ViewKey) : "product";
+}
+
+// ---- P0.2 + P2.2 时间窗口 + 多种对比方式 -----------------------------------
+
+type ComparePreset = "" | "prev" | "WoW" | "MoM" | "YoY";
+
+const comparePresetLabels: Record<ComparePreset, string> = {
+  "": "关闭对比",
+  prev: "前一周期",
+  WoW: "上周同期 (WoW)",
+  MoM: "上月同期 (MoM)",
+  YoY: "去年同期 (YoY)"
+};
+
+function DrillToolbar({
+  total,
+  windowSize,
+  setWindowSize,
+  preset,
+  setPreset,
+  canPrev,
+  remoteAvailable,
+  remoteLoading,
+  remoteEmpty,
+  presets = [7, 14, 30]
+}: {
+  total: number;
+  windowSize: number;
+  setWindowSize: (n: number) => void;
+  preset: ComparePreset;
+  setPreset: (p: ComparePreset) => void;
+  canPrev: boolean;
+  remoteAvailable: boolean;
+  remoteLoading?: boolean;
+  remoteEmpty?: boolean;
+  presets?: number[];
+}) {
+  const options = Array.from(new Set([...presets.filter((p) => p < total), total])).sort((a, b) => a - b);
+  return (
+    <div className="drillToolbar">
+      <div className="drillWindowGroup">
+        {options.map((w) => (
+          <button
+            key={w}
+            type="button"
+            className={`drillWindowBtn ${w === windowSize ? "active" : ""}`}
+            onClick={() => setWindowSize(w)}
+          >
+            {w === total ? `全部 ${total} 天` : `近 ${w} 天`}
+          </button>
+        ))}
+      </div>
+      <div className="drillCompareSelector">
+        <span className="drillCompareLabel">对比</span>
+        <select
+          value={preset}
+          onChange={(e) => setPreset(e.target.value as ComparePreset)}
+          className="drillCompareSelect"
+        >
+          <option value="">{comparePresetLabels[""]}</option>
+          <option value="prev" disabled={!canPrev}>{comparePresetLabels.prev}{canPrev ? "" : "（前段不足）"}</option>
+          <option value="WoW" disabled={!remoteAvailable}>{comparePresetLabels.WoW}{remoteAvailable ? "" : "（需历史库）"}</option>
+          <option value="MoM" disabled={!remoteAvailable}>{comparePresetLabels.MoM}{remoteAvailable ? "" : "（需历史库）"}</option>
+          <option value="YoY" disabled={!remoteAvailable}>{comparePresetLabels.YoY}{remoteAvailable ? "" : "（需历史库）"}</option>
+        </select>
+        {remoteLoading && <span className="drillCompareHint">加载中…</span>}
+        {remoteEmpty && !remoteLoading && <span className="drillCompareHint warn">该时段历史库无数据</span>}
+      </div>
+    </div>
+  );
+}
+
+type ExtraMetric = {
+  key: string;
+  label: string;
+  axis: "money" | "ratio";
+  color: string;
+};
+
+type DrillWindowSlice = {
+  main: AnyRecord[];
+  compare: AnyRecord[] | null;
+  extras?: ExtraMetric[];
+  windowSize: number;
+};
+
+function sliceDrillWindow(rows: AnyRecord[], windowSize: number, compare: boolean): DrillWindowSlice {
+  const total = rows.length;
+  const actual = windowSize > 0 && windowSize < total ? windowSize : total;
+  const main = actual >= total ? rows : rows.slice(-actual);
+  const compareRows = compare && actual * 2 <= total ? rows.slice(-actual * 2, -actual) : null;
+  return { main, compare: compareRows, windowSize: actual };
+}
+
+function buildCompareLineSeries(
+  name: string,
+  compareRows: AnyRecord[] | null,
+  mainLength: number,
+  getValue: (row: AnyRecord) => number | null,
+  options: { color?: string; yAxisIndex?: number } = {}
+): unknown[] {
+  if (!compareRows || !compareRows.length) return [];
+  const padding = Array(Math.max(0, mainLength - compareRows.length)).fill(null);
+  const values = compareRows.map(getValue);
+  return [
+    {
+      name: `对比·${name}`,
+      type: "line",
+      smooth: true,
+      symbol: "none",
+      yAxisIndex: options.yAxisIndex ?? 0,
+      lineStyle: { color: options.color || "rgba(245, 240, 223, 0.5)", width: 2, type: "dashed" },
+      itemStyle: { color: options.color || "rgba(245, 240, 223, 0.5)" },
+      data: [...padding, ...values]
+    }
+  ];
+}
+
+type CompareEndpoint = {
+  view: "ad" | "product";
+  metric: string;
+  metricKey: string;  // 远端返回 {date, value}；前端 reshape 成 {date, [metricKey]: value} 以兼容 buildOption
+};
+
+function DrillChart({
+  rows,
+  buildOption,
+  defaultWindow = 0,
+  compareEndpoint,
+  availableExtras
+}: {
+  rows: AnyRecord[];
+  buildOption: (slice: DrillWindowSlice) => unknown;
+  defaultWindow?: number;
+  compareEndpoint?: CompareEndpoint;
+  availableExtras?: ExtraMetric[];
+}) {
+  const [windowSize, setWindowSize] = React.useState(defaultWindow);
+  const [preset, setPreset] = React.useState<ComparePreset>("");
+  const [remoteCompare, setRemoteCompare] = React.useState<AnyRecord[] | null>(null);
+  const [remoteLoading, setRemoteLoading] = React.useState(false);
+  const [selectedExtras, setSelectedExtras] = React.useState<string[]>([]);
+
+  const localSlice = sliceDrillWindow(rows, windowSize, preset === "prev");
+  const mainStart = localSlice.main[0]?.date as string | undefined;
+  const mainEnd = localSlice.main[localSlice.main.length - 1]?.date as string | undefined;
+  const canPrev = localSlice.windowSize * 2 <= rows.length;
+  const remoteAvailable = Boolean(compareEndpoint && mainStart && mainEnd);
+
+  React.useEffect(() => {
+    if (!remoteAvailable || !compareEndpoint || preset === "" || preset === "prev") {
+      setRemoteCompare(null);
+      setRemoteLoading(false);
+      return;
+    }
+    setRemoteLoading(true);
+    const ctrl = new AbortController();
+    const params = new URLSearchParams({
+      view: compareEndpoint.view,
+      metric: compareEndpoint.metric,
+      start: String(mainStart),
+      end: String(mainEnd),
+      preset
+    });
+    fetch(`/api/history/compare?${params}`, { signal: ctrl.signal })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((json) => {
+        const days = (json.compare?.days || []) as Array<{ date: string; value: number | null }>;
+        const remapped = days.map((d) => ({ date: d.date, [compareEndpoint.metricKey]: d.value }));
+        setRemoteCompare(remapped);
+        setRemoteLoading(false);
+      })
+      .catch((e) => {
+        if (e.name !== "AbortError") {
+          setRemoteCompare([]);
+          setRemoteLoading(false);
+        }
+      });
+    return () => ctrl.abort();
+  }, [preset, mainStart, mainEnd, remoteAvailable, compareEndpoint?.view, compareEndpoint?.metric, compareEndpoint?.metricKey]);
+
+  // 自动回退：若用户选择 prev 但前段不足，强制回到关闭
+  React.useEffect(() => {
+    if (preset === "prev" && !canPrev) setPreset("");
+  }, [preset, canPrev]);
+
+  const finalCompare = preset === "prev"
+    ? localSlice.compare
+    : (preset === "WoW" || preset === "MoM" || preset === "YoY")
+      ? remoteCompare
+      : null;
+
+  const activeExtras = availableExtras?.filter((m) => selectedExtras.includes(m.key)) ?? [];
+  const sliceForBuild: DrillWindowSlice = {
+    main: localSlice.main,
+    compare: finalCompare,
+    extras: activeExtras,
+    windowSize: localSlice.windowSize
+  };
+  const option = buildOption(sliceForBuild);
+  const remoteEmpty = Boolean(
+    (preset === "WoW" || preset === "MoM" || preset === "YoY") && !remoteLoading && remoteCompare && remoteCompare.length === 0
+  );
+
+  return (
+    <div className="drillChartWrap">
+      <DrillToolbar
+        total={rows.length}
+        windowSize={localSlice.windowSize}
+        setWindowSize={setWindowSize}
+        preset={preset}
+        setPreset={setPreset}
+        canPrev={canPrev}
+        remoteAvailable={remoteAvailable}
+        remoteLoading={remoteLoading}
+        remoteEmpty={remoteEmpty}
+      />
+      {availableExtras && availableExtras.length > 0 && (
+        <div className="drillExtrasRow">
+          <span className="drillExtrasLabel">叠加指标</span>
+          {availableExtras.map((metric) => {
+            const active = selectedExtras.includes(metric.key);
+            return (
+              <button
+                key={metric.key}
+                type="button"
+                className={`drillExtrasChip ${active ? "active" : ""}`}
+                style={active ? { borderColor: metric.color, color: metric.color, background: `${metric.color}1a` } : undefined}
+                onClick={() =>
+                  setSelectedExtras((prev) =>
+                    prev.includes(metric.key) ? prev.filter((k) => k !== metric.key) : [...prev, metric.key]
+                  )
+                }
+              >
+                {metric.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      <EChart height={420} option={option} />
+    </div>
+  );
 }
 
 const productWeeklyMetrics: WeeklyMetric[] = [
@@ -100,10 +334,25 @@ type Filters = {
   q: string;
 };
 
-function useApi<T>(active: ViewKey, filters: Filters) {
+function useApi<T>(active: ViewKey, filters: Filters, dataVersion?: unknown) {
   const [data, setData] = React.useState<T | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState("");
+  const prevActiveRef = React.useRef<ViewKey>(active);
+  // 客户端缓存:看过的"视图+筛选"切回去秒显、不再请求。上限 24 条(每条结果较大,防内存膨胀)。
+  const cacheRef = React.useRef<Map<string, T>>(new Map());
+
+  // 搜索词防抖 350ms:输入时不每键发请求(每键都会触发后端对几十万行重算)
+  const [debouncedQ, setDebouncedQ] = React.useState(filters.q);
+  React.useEffect(() => {
+    const id = setTimeout(() => setDebouncedQ(filters.q), 350);
+    return () => clearTimeout(id);
+  }, [filters.q]);
+
+  // 数据版本变化(上传/清空源数据 → meta 引用变)→ 清空客户端缓存,避免切回去显示旧数据
+  React.useEffect(() => {
+    cacheRef.current.clear();
+  }, [dataVersion]);
 
   React.useEffect(() => {
     const endpoint = endpoints[active];
@@ -112,17 +361,37 @@ function useApi<T>(active: ViewKey, filters: Filters) {
       setError("");
       return;
     }
+    const key = `${active}|${filters.start}|${filters.end}|${filters.scene}|${debouncedQ}`;
+    const hit = cacheRef.current.get(key);
+    if (hit) {
+      // 命中客户端缓存:秒显,不发请求、不转圈
+      setData(hit);
+      setError("");
+      setLoading(false);
+      prevActiveRef.current = active;
+      return;
+    }
     let cancelled = false;
+    // 切换视图(数据结构不同)必须清空;同视图改筛选则保留旧数据,
+    // 加载完再替换 → 消除"空白闪烁",体感更顺(stale-while-revalidate)
+    if (prevActiveRef.current !== active) setData(null);
+    prevActiveRef.current = active;
     setLoading(true);
     setError("");
-    setData(null);
-    fetch(`${endpoint}${buildQuery(filters)}`)
+    fetch(`${endpoint}${buildQuery({ ...filters, q: debouncedQ })}`)
       .then(async (res) => {
-        if (!res.ok) throw new Error((await res.json()).error || res.statusText);
+        // readApiError 兜底空 body 的 5xx,避免直接 res.json() 抛
+        // "Unexpected end of JSON input"(后端进程挂掉时代理回的空 500)
+        if (!res.ok) throw new Error(await readApiError(res));
         return res.json();
       })
       .then((json) => {
-        if (!cancelled) setData(json);
+        if (!cancelled) {
+          const cache = cacheRef.current;
+          cache.set(key, json);
+          if (cache.size > 24) cache.delete(cache.keys().next().value); // 淘汰最旧一条
+          setData(json);
+        }
       })
       .catch((err: Error) => {
         if (!cancelled) setError(err.message);
@@ -133,20 +402,51 @@ function useApi<T>(active: ViewKey, filters: Filters) {
     return () => {
       cancelled = true;
     };
-  }, [active, filters.start, filters.end, filters.scene, filters.q]);
+  }, [active, filters.start, filters.end, filters.scene, debouncedQ]);
 
   return { data, loading, error };
 }
+function RootApp() {
+  const auth = useAuth();
+  const [hash, setHash] = React.useState(window.location.hash);
+  React.useEffect(() => {
+    const onHash = () => setHash(window.location.hash);
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
 
-function App() {
+  if (auth.loading) {
+    return (
+      <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "#10140c", color: "#f5c877" }}>
+        <span>正在加载...</span>
+      </div>
+    );
+  }
+  if (!auth.user) {
+    const route = hash.replace(/^#\/?/, "").split("?")[0];
+    if (route === "register") return <RegisterView onAuthChange={auth.refresh} features={auth.features} />;
+    return <LoginView onAuthChange={auth.refresh} features={auth.features} />;
+  }
+  return <App auth={auth} />;
+}
+
+function App({ auth }: { auth: AuthState }) {
   const [active, setActive] = React.useState<ViewKey>(() => viewFromHash());
   const [filters, setFilters] = React.useState<Filters>({ start: "", end: "", scene: "", q: "" });
   const [meta, setMeta] = React.useState<Meta | null>(null);
-  const { data, loading, error } = useApi<Record<string, unknown>>(active, filters);
+  // useApi 内部对 endpoints[active] 不存在的 view (sources / admin) 会短路,不发请求
+  const { data, loading, error } = useApi<Record<string, unknown>>(active, filters, meta);
+
+  // 守卫:非 admin 闯入 #admin → 弹回商品页
+  React.useEffect(() => {
+    if (active === "admin" && auth.user?.role !== "admin") {
+      window.location.hash = "#product";
+    }
+  }, [active, auth.user?.role]);
 
   React.useEffect(() => {
-    fetch("/api/meta")
-      .then((res) => res.json())
+    fetch("/api/meta", { credentials: "include" })
+      .then((res) => (res.ok ? res.json() : null))
       .then(setMeta)
       .catch(() => setMeta(null));
   }, []);
@@ -187,15 +487,23 @@ function App() {
           </div>
         </div>
         <nav className="navList" aria-label="主导航">
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            return (
-              <button key={item.key} className={active === item.key ? "navItem active" : "navItem"} onClick={() => activateView(item.key)}>
-                <Icon size={18} />
-                <span>{item.label}</span>
-              </button>
-            );
-          })}
+          {navItems
+            .filter((item) => !item.adminOnly || auth.user?.role === "admin")
+            .map((item) => {
+              const Icon = item.icon;
+              return (
+                <button
+                  key={item.key}
+                  className={active === item.key ? "navItem active" : "navItem"}
+                  onClick={() => activateView(item.key)}
+                  onMouseEnter={prefetchers[item.key]}
+                  onFocus={prefetchers[item.key]}
+                >
+                  <Icon size={18} />
+                  <span>{item.label}</span>
+                </button>
+              );
+            })}
         </nav>
         <div className="sourceBadge">
           <Upload size={16} />
@@ -208,6 +516,24 @@ function App() {
           <div>
             <p className="eyebrow">Web 端展示</p>
             <h1>{activeTitle}</h1>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginRight: 16, fontSize: 13 }}>
+            <span style={{ color: "rgba(245, 240, 223, 0.6)" }}>登录:</span>
+            <strong style={{ color: "#f5c877" }}>{auth.user?.username}</strong>
+            {auth.user?.role === "admin" && (
+              <span style={{
+                fontSize: 11, padding: "2px 8px", borderRadius: 4,
+                background: "rgba(245, 200, 119, 0.18)", color: "#f5c877"
+              }}>admin</span>
+            )}
+            <button
+              onClick={() => logout(auth.refresh)}
+              style={{
+                marginLeft: 8, padding: "4px 10px", borderRadius: 4, cursor: "pointer",
+                border: "1px solid rgba(245, 200, 119, 0.3)", background: "transparent",
+                color: "#f5f0df", fontSize: 12
+              }}
+            >退出</button>
           </div>
           <div className="filters">
             <label>
@@ -233,14 +559,32 @@ function App() {
             )}
             <label className="searchBox">
               <span>搜索</span>
-              <input value={filters.q} placeholder="商品 / 计划 / 人群 / 词" onChange={(event) => setFilters((prev) => ({ ...prev, q: event.target.value }))} />
+              <input value={filters.q} placeholder="商品 / 计划 / 人群 / 词 / ID" onChange={(event) => setFilters((prev) => ({ ...prev, q: event.target.value }))} />
             </label>
+            {endpoints[active] && (
+              <a
+                className="exportButton"
+                href={`${endpoints[active]}/export${buildQuery(filters)}`}
+                download
+                title="按当前筛选导出 xlsx"
+              >
+                导出 Excel
+              </a>
+            )}
           </div>
         </header>
 
         {loading && <div className="stateLine">正在按当前筛选重算指标...</div>}
         {error && <div className="stateLine error">数据服务异常：{error}</div>}
-        {!error && active === "sources" && <SourcesView meta={meta} onMetaChange={setMeta} />}
+        <LazyView when={!error && active === "sources"} fallback={<div className="stateLine">加载源数据页...</div>}>
+          <SourcesView meta={meta} onMetaChange={setMeta} />
+        </LazyView>
+        <LazyView
+          when={!error && active === "admin" && auth.user?.role === "admin"}
+          fallback={<div className="stateLine">加载管理后台...</div>}
+        >
+          <AdminView />
+        </LazyView>
         {!error && active === "product" && data && <ProductView data={data} />}
         {!error && active === "ad-products" && data && <AdProductsView data={data} />}
         {!error && active === "keywords" && data && <KeywordView data={data} />}
@@ -251,127 +595,139 @@ function App() {
   );
 }
 
-function SourcesView({ meta, onMetaChange }: { meta: Meta | null; onMetaChange: (meta: Meta) => void }) {
-  const [files, setFiles] = React.useState<Record<string, File | null>>({});
-  const [uploading, setUploading] = React.useState(false);
-  const [message, setMessage] = React.useState("");
-  const [inputKey, setInputKey] = React.useState(0);
-  const selectedCount = Object.values(files).filter(Boolean).length;
-  const columns: ColumnDef<MetaSource>[] = [
-    { key: "name", label: "来源表", width: "220px" },
-    { key: "mode", label: "数据模式", format: sourceModeLabel },
-    { key: "rows", label: "行数", format: fmtInt },
-    { key: "dateField", label: "日期字段" },
-    { key: "start", label: "开始日期" },
-    { key: "end", label: "结束日期" },
-    { key: "file", label: "文件路径", width: "460px" }
-  ];
+function ProductRowDrilldown({ row }: { row: AnyRecord }) {
+  const daily = (row.daily as AnyRecord[]) || [];
+  const dates = daily.map((d) => String(d.date || ""));
+  const payments = daily.map((d) => Number(d.payment) || 0);
+  const refunds = daily.map((d) => Number(d.refund) || 0);
+  const spends = daily.map((d) => Number(d.spend) || 0);
+  const netFeeRatios = daily.map((d) => (typeof d.netFeeRatio === "number" ? d.netFeeRatio : null));
+  const totalPay = payments.reduce((a, b) => a + b, 0);
+  const totalRefund = refunds.reduce((a, b) => a + b, 0);
+  const totalSpend = spends.reduce((a, b) => a + b, 0);
+  const netPay = totalPay - totalRefund;
 
-  async function readApiMessage(response: Response) {
-    const payload = await response.json().catch(() => null);
-    return payload?.error || response.statusText;
-  }
-
-  async function uploadSources() {
-    if (!selectedCount) return;
-    const formData = new FormData();
-    Object.entries(files).forEach(([key, file]) => {
-      if (file) formData.append(key, file);
-    });
-
-    setUploading(true);
-    setMessage("");
-    try {
-      const response = await fetch("/api/uploads/sources", { method: "POST", body: formData });
-      if (!response.ok) throw new Error(await readApiMessage(response));
-      const payload = await response.json();
-      onMetaChange(payload.meta);
-      setFiles({});
-      setInputKey((key) => key + 1);
-      setMessage(`已更新 ${fmtInt(payload.updated?.length || 0)} 张源表`);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "上传失败");
-    } finally {
-      setUploading(false);
-    }
-  }
-
-  async function clearSources() {
-    setUploading(true);
-    setMessage("");
-    try {
-      const response = await fetch("/api/uploads/sources", { method: "DELETE" });
-      if (!response.ok) throw new Error(await readApiMessage(response));
-      const payload = await response.json();
-      onMetaChange(payload.meta);
-      setFiles({});
-      setInputKey((key) => key + 1);
-      setMessage("已清空源数据");
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "清空失败");
-    } finally {
-      setUploading(false);
-    }
-  }
+  const option = {
+    backgroundColor: "transparent",
+    tooltip: {
+      trigger: "axis",
+      backgroundColor: "rgba(20,24,16,0.95)",
+      borderColor: "rgba(245,200,119,0.4)",
+      textStyle: { color: "#f5f0df" },
+      valueFormatter: (value: unknown, _i: unknown, idx: number) => {
+        // ECharts 不提供 series 上下文给 valueFormatter，靠 formatter 自定义比较 verbose；
+        // 直接让金额按 money 显示、费比按 % 显示，混排无所谓——前端拿到结构后做总览
+        return typeof value === "number" ? value.toLocaleString("zh-CN", { maximumFractionDigits: 2 }) : "-";
+      }
+    },
+    legend: { textStyle: { color: "#d9d4c4" }, top: 0 },
+    grid: { left: 64, right: 64, top: 32, bottom: dates.length > 30 ? 56 : 28 },
+    xAxis: { type: "category", data: dates, axisLabel: { color: "#d9d4c4", rotate: dates.length > 14 ? 38 : 0 } },
+    yAxis: [
+      { type: "value", name: "金额", axisLabel: { color: "#d9d4c4", formatter: (v: number) => fmtMoney(v) }, splitLine: { lineStyle: { color: "rgba(255,255,255,0.08)" } } },
+      { type: "value", name: "净费比", axisLabel: { color: "#d9d4c4", formatter: (v: number) => fmtPercent(v) }, splitLine: { show: false }, position: "right" }
+    ],
+    series: [
+      { name: "支付", type: "line", yAxisIndex: 0, smooth: true, symbol: "circle", symbolSize: 5, itemStyle: { color: "#f5c877" }, lineStyle: { color: "#f5c877", width: 2 }, areaStyle: { color: "rgba(245,200,119,0.14)" }, data: payments },
+      { name: "退款", type: "line", yAxisIndex: 0, smooth: true, symbol: "circle", symbolSize: 4, itemStyle: { color: "#e56e60" }, lineStyle: { color: "#e56e60", width: 2 }, data: refunds },
+      { name: "推广花费", type: "line", yAxisIndex: 0, smooth: true, symbol: "circle", symbolSize: 4, itemStyle: { color: "#60c7bc" }, lineStyle: { color: "#60c7bc", width: 2 }, data: spends },
+      { name: "净费比", type: "line", yAxisIndex: 1, smooth: true, symbol: "none", lineStyle: { color: "#d9ee62", width: 2, type: "dashed" }, data: netFeeRatios }
+    ]
+  };
 
   return (
-    <section className="viewStack">
-      <div className="panel">
-        <div className="panelHeader">
-          <div>
-            <p className="eyebrow">数据接入</p>
-            <h2>自定义上传源表</h2>
-          </div>
-          <span className="pill">{meta?.sourceDataCleared ? "当前为空数据" : `上传目录: ${meta?.uploadDir || "uploads/source-data"}`}</span>
-        </div>
-        <div className="uploadGrid">
-          {sourceUploadSlots.map((slot) => {
-            const file = files[slot.id];
-            return (
-              <label key={`${slot.id}-${inputKey}`} className="uploadSlot">
-                <span>{slot.label}</span>
-                <strong>{file?.name || "选择文件"}</strong>
-                <em>{slot.hint}</em>
-                <input
-                  type="file"
-                  accept={slot.accept}
-                  onChange={(event) => {
-                    const fileValue = event.target.files?.[0] || null;
-                    setFiles((prev) => ({ ...prev, [slot.id]: fileValue }));
-                  }}
-                />
-              </label>
-            );
-          })}
-        </div>
-        <div className="uploadActions">
-          <button type="button" className="primaryButton" disabled={!selectedCount || uploading} onClick={uploadSources}>
-            {uploading ? "处理中" : "上传并重算"}
-          </button>
-          <button type="button" className="iconTextButton" disabled={uploading} onClick={clearSources}>
-            清空源数据
-          </button>
-        </div>
-        {message && <div className="uploadNotice">{message}</div>}
+    <div className="expandPanel">
+      <div className="expandPanelTitle">
+        <strong>{String(row.subjectCode || "").slice(0, 80)}</strong>
+        <span>分日走势（{daily.length} 天有活跃数据）</span>
       </div>
-      <div className="panel">
-        <div className="panelHeader">
-          <div>
-            <p className="eyebrow">数据接入</p>
-            <h2>源表状态</h2>
-          </div>
-          <span className="pill">{meta?.dataDir || "等待数据目录"}</span>
-        </div>
-        <DataTable rows={meta?.sources || []} columns={columns} pageSize={20} />
+      <div className="expandPanelMeta">
+        <span>区间合计 · 支付 <strong>{fmtMoney(totalPay)}</strong></span>
+        <span>退款 <strong>{fmtMoney(totalRefund)}</strong></span>
+        <span>推广花费 <strong>{fmtMoney(totalSpend)}</strong></span>
+        <span>区间净费比 <strong>{totalSpend > 0 && netPay !== 0 ? fmtPercent(totalSpend / netPay) : "未推广"}</strong></span>
+        <span>区间净ROI <strong>{totalSpend > 0 ? fmtNumber(netPay / totalSpend) : "未推广"}</strong></span>
       </div>
-    </section>
+      <EChart height={280} option={option} />
+    </div>
   );
 }
 
-function sourceModeLabel(value: unknown) {
-  if (value === "uploaded") return "自定义";
-  if (value === "empty") return "已清空";
-  return "默认";
+function AdRowDrilldown({ row }: { row: AnyRecord }) {
+  const daily = (row.daily as AnyRecord[]) || [];
+  const title = String(row.planCode || row.keywordCode || row.crowdCode || row.contentCode || row.subjectCode || row.word || "");
+  const dates = daily.map((d) => String(d.date || ""));
+  const spends = daily.map((d) => Number(d.spend) || 0);
+  const gmvs = daily.map((d) => Number(d.gmv) || 0);
+  const rois = daily.map((d) => (typeof d.roi === "number" ? d.roi : null));
+  const ctrs = daily.map((d) => (typeof d.ctr === "number" ? d.ctr : null));
+  const cvrs = daily.map((d) => (typeof d.cvr === "number" ? d.cvr : null));
+  const totalSpend = spends.reduce((a, b) => a + b, 0);
+  const totalGmv = gmvs.reduce((a, b) => a + b, 0);
+  const totalClicks = daily.reduce((a, d) => a + (Number(d.clicks) || 0), 0);
+  const totalOrders = daily.reduce((a, d) => a + (Number(d.orders) || 0), 0);
+
+  const option = {
+    backgroundColor: "transparent",
+    tooltip: {
+      trigger: "axis",
+      backgroundColor: "rgba(20,24,16,0.95)",
+      borderColor: "rgba(245,200,119,0.4)",
+      textStyle: { color: "#f5f0df" },
+      formatter: (params: unknown) => {
+        const arr = Array.isArray(params) ? params : [params];
+        const idx = (arr[0] as { dataIndex: number }).dataIndex;
+        const d = daily[idx] || {};
+        const lines = arr.map((p: any) => `<div>${p.marker} ${p.seriesName}: <strong>${typeof p.value === "number" ? (p.seriesName === "ROI" ? fmtNumber(p.value) : fmtMoney(p.value)) : "-"}</strong></div>`);
+        const extra = `
+          <div style="margin-top:6px; padding-top:6px; border-top:1px dashed rgba(245,200,119,0.3); color:rgba(245,240,223,0.78); font-size:11px">
+            CTR ${typeof d.ctr === "number" ? fmtPercent(d.ctr) : "-"}　·　CVR ${typeof d.cvr === "number" ? fmtPercent(d.cvr) : "-"}　·　点击 ${fmtInt(d.clicks)}　·　订单 ${fmtInt(d.orders)}
+          </div>`;
+        return `<div><strong>${(arr[0] as { axisValue: string }).axisValue}</strong>${lines.join("")}${extra}</div>`;
+      }
+    },
+    legend: { textStyle: { color: "#d9d4c4" }, top: 0 },
+    grid: { left: 64, right: 64, top: 32, bottom: dates.length > 30 ? 56 : 28 },
+    xAxis: { type: "category", data: dates, axisLabel: { color: "#d9d4c4", rotate: dates.length > 14 ? 38 : 0 } },
+    yAxis: [
+      { type: "value", name: "金额", axisLabel: { color: "#d9d4c4", formatter: (v: number) => fmtMoney(v) }, splitLine: { lineStyle: { color: "rgba(255,255,255,0.08)" } } },
+      { type: "value", name: "ROI", axisLabel: { color: "#d9d4c4", formatter: (v: number) => fmtNumber(v) }, splitLine: { show: false }, position: "right" }
+    ],
+    series: [
+      { name: "花费", type: "line", yAxisIndex: 0, smooth: true, symbol: "circle", symbolSize: 5, itemStyle: { color: "#60c7bc" }, lineStyle: { color: "#60c7bc", width: 2 }, areaStyle: { color: "rgba(96,199,188,0.12)" }, data: spends },
+      { name: "GMV", type: "line", yAxisIndex: 0, smooth: true, symbol: "circle", symbolSize: 4, itemStyle: { color: "#f5c877" }, lineStyle: { color: "#f5c877", width: 2 }, data: gmvs },
+      { name: "ROI", type: "line", yAxisIndex: 1, smooth: true, symbol: "none", lineStyle: { color: "#d9ee62", width: 2, type: "dashed" }, data: rois }
+    ]
+  };
+  void ctrs;
+  void cvrs;
+
+  return (
+    <div className="expandPanel">
+      <div className="expandPanelTitle">
+        <strong>{title.slice(0, 80)}</strong>
+        <span>分日走势（{daily.length} 天有活跃数据）</span>
+      </div>
+      <div className="expandPanelMeta">
+        <span>区间花费 <strong>{fmtMoney(totalSpend)}</strong></span>
+        <span>GMV <strong>{fmtMoney(totalGmv)}</strong></span>
+        <span>ROI <strong>{totalSpend > 0 ? fmtNumber(totalGmv / totalSpend) : "—"}</strong></span>
+        <span>点击 <strong>{fmtInt(totalClicks)}</strong></span>
+        <span>订单 <strong>{fmtInt(totalOrders)}</strong></span>
+      </div>
+      <EChart height={280} option={option} />
+    </div>
+  );
+}
+
+// 商品级"费比 / 链接净ROI"在 spend=0 或 pay=0 时数学上无定义，
+// 用业务语义字样区分，避免把 0% / "-" 误读为"推广高效"或"数据缺失"
+function formatPromoMetric(value: unknown, row: AnyRecord, formatter: (v: unknown) => string) {
+  const pay = Number(row.pay) || 0;
+  const spend = Number(row["推广消耗"]) || 0;
+  if (spend === 0) return "未推广";
+  if (pay === 0) return "无销售";
+  return formatter(value);
 }
 
 function ProductView({ data }: { data: AnyRecord }) {
@@ -382,9 +738,20 @@ function ProductView({ data }: { data: AnyRecord }) {
   const daily = (data.daily as AnyRecord[]) || [];
   const drillConfig =
     drilldown === "payDaily"
-      ? { title: "全店支付金额分日走势", option: dailyPayOption(daily) }
+      ? { title: "全店支付金额分日走势", build: (s: DrillWindowSlice) => dailyPayOption(s.main, s.compare), endpoint: { view: "product" as const, metric: "pay", metricKey: "pay" }, extras: undefined as ExtraMetric[] | undefined }
       : drilldown === "netFeeDaily"
-        ? { title: "全店净费比分日走势", option: dailyNetFeeOption(daily) }
+        ? {
+            title: "全店净费比分日走势",
+            build: (s: DrillWindowSlice) => dailyNetFeeOption(s.main, s.compare, s.extras),
+            endpoint: { view: "product" as const, metric: "netFeeRatio", metricKey: "netFeeRatio" },
+            extras: [
+              { key: "支付金额", label: "支付", axis: "money" as const, color: "#f5c877" },
+              { key: "成功退款金额", label: "退款", axis: "money" as const, color: "#e56e60" },
+              { key: "推广消耗", label: "推广花费", axis: "money" as const, color: "#60c7bc" },
+              { key: "refundRatio", label: "退款率", axis: "ratio" as const, color: "#c084fc" },
+              { key: "netRoi", label: "净 ROI", axis: "ratio" as const, color: "#d9ee62" }
+            ]
+          }
         : null;
   const columns: ColumnDef<AnyRecord>[] = [
     { key: "subjectCode", label: "主体编码", width: "300px" },
@@ -394,13 +761,13 @@ function ProductView({ data }: { data: AnyRecord }) {
     { key: "customerPrice", label: "客单价", format: fmtNumber },
     { key: "annualPay", label: "年累计支付金额", format: fmtMoney },
     { key: "annualPayShare", label: "年累计支付金额占比", format: fmtPercent },
-    { key: "feeRatio", label: "费比", format: fmtPercent },
+    { key: "feeRatio", label: "费比", format: (value, row) => formatPromoMetric(value, row, fmtPercent) },
     { key: "refundRatio", label: "退款金额占比", format: fmtPercent },
     { key: "repeatRate", label: "复购率", format: fmtPercent },
     { key: "repeatPayRatio", label: "复购金额占比", format: fmtPercent },
     { key: "cartRate", label: "加购率", format: fmtPercent },
     { key: "pvPerVisitor", label: "人均浏览量", format: fmtNumber },
-    { key: "netRoi", label: "链接净ROI", format: fmtNumber }
+    { key: "netRoi", label: "链接净ROI", format: (value, row) => formatPromoMetric(value, row, fmtNumber) }
   ];
 
   return (
@@ -413,7 +780,7 @@ function ProductView({ data }: { data: AnyRecord }) {
           actionLabel="点击下钻: 分日走势"
           onClick={() => setDrilldown((prev) => (prev === "payDaily" ? null : "payDaily"))}
         />
-        <MetricCard label="TOP1 支付占比" value={fmtPercent(summary.topShare)} />
+        <MetricCard label="全店退款金额占比" value={fmtPercent(summary.refundRatio)} />
         <MetricCard
           label="全店净费比"
           value={fmtPercent(summary.netFeeRatio)}
@@ -433,7 +800,7 @@ function ProductView({ data }: { data: AnyRecord }) {
               <span>关闭</span>
             </button>
           </div>
-          <EChart height={420} option={drillConfig.option} />
+          <DrillChart rows={daily} buildOption={drillConfig.build} compareEndpoint={drillConfig.endpoint} availableExtras={(drillConfig as { extras?: ExtraMetric[] }).extras} />
         </div>
       )}
       <div className="panel">
@@ -462,9 +829,15 @@ function ProductView({ data }: { data: AnyRecord }) {
             <p className="eyebrow">图表-商品维度分析表</p>
             <h2>商品经营明细</h2>
           </div>
-          <span className="pill">共 {fmtInt(table.length)} 条数据</span>
+          <span className="pill">共 {fmtInt(summary.totalGroups ?? table.length)} 个商品{Number(summary.shownGroups ?? table.length) < Number(summary.totalGroups ?? table.length) ? `,按支付额展示前 ${fmtInt(summary.shownGroups)}` : ""}</span>
         </div>
-        <DataTable rows={table} columns={columns} pageSize={15} />
+        <DataTable
+          rows={table}
+          columns={columns}
+          pageSize={15}
+          isExpandable={(row) => Array.isArray(row.daily) && (row.daily as unknown[]).length > 0}
+          renderExpand={(row) => <ProductRowDrilldown row={row} />}
+        />
       </div>
     </section>
   );
@@ -479,11 +852,11 @@ function AdProductsView({ data }: { data: AnyRecord }) {
   const planTable = (data.planTable as AnyRecord[]) || [];
   const drillConfig =
     drilldown === "spendDaily"
-      ? { title: "推广花费分日走势", option: dailySpendOption(daily) }
+      ? { title: "推广花费分日走势", build: (s: DrillWindowSlice) => dailySpendOption(s.main, s.compare), endpoint: { view: "ad" as const, metric: "spend", metricKey: "spend" } }
       : drilldown === "gmvDaily"
-        ? { title: "推广成交金额分日走势", option: dailyGmvOption(daily) }
+        ? { title: "推广成交金额分日走势", build: (s: DrillWindowSlice) => dailyGmvOption(s.main, s.compare), endpoint: { view: "ad" as const, metric: "gmv", metricKey: "gmv" } }
         : drilldown === "roiDaily"
-          ? { title: "推广整体投产分日走势", option: dailyRoiOption(daily) }
+          ? { title: "推广整体投产分日走势", build: (s: DrillWindowSlice) => dailyRoiOption(s.main, s.compare), endpoint: { view: "ad" as const, metric: "roi", metricKey: "roi" } }
           : null;
   const columns: ColumnDef<AnyRecord>[] = [
     { key: "planCode", label: "计划编码", width: "520px" },
@@ -532,7 +905,7 @@ function AdProductsView({ data }: { data: AnyRecord }) {
               <span>关闭</span>
             </button>
           </div>
-          <EChart height={420} option={drillConfig.option} />
+          <DrillChart rows={daily} buildOption={drillConfig.build} compareEndpoint={drillConfig.endpoint} availableExtras={(drillConfig as { extras?: ExtraMetric[] }).extras} />
         </div>
       )}
       <div className="splitGrid">
@@ -573,9 +946,15 @@ function AdProductsView({ data }: { data: AnyRecord }) {
             <p className="eyebrow">图表-推广商品分析表</p>
             <h2>推广计划明细</h2>
           </div>
-          <span className="pill">共 {fmtInt(planTable.length)} 条数据</span>
+          <span className="pill">共 {fmtInt(summary.plans)} 个计划{Number(summary.shownPlans) < Number(summary.plans) ? `,按花费展示前 ${fmtInt(summary.shownPlans)}` : ""}</span>
         </div>
-        <DataTable rows={planTable} columns={columns} pageSize={18} />
+        <DataTable
+          rows={planTable}
+          columns={columns}
+          pageSize={18}
+          isExpandable={(row) => Array.isArray(row.daily) && (row.daily as unknown[]).length > 0}
+          renderExpand={(row) => <AdRowDrilldown row={row} />}
+        />
       </div>
     </section>
   );
@@ -586,7 +965,7 @@ function KeywordView({ data }: { data: AnyRecord }) {
   const summary = data.summary as AnyRecord;
   const table = (data.table as AnyRecord[]) || [];
   const daily = (data.daily as AnyRecord[]) || [];
-  const drillConfig = drilldown === "spendDaily" ? { title: "关键词花费分日走势", option: dailySpendOption(daily) } : null;
+  const drillConfig = drilldown === "spendDaily" ? { title: "关键词花费分日走势", build: (s: DrillWindowSlice) => dailySpendOption(s.main, s.compare), endpoint: { view: "ad" as const, metric: "spend", metricKey: "spend" } } : null;
   const columns = keywordColumns("keywordCode");
 
   return (
@@ -614,7 +993,7 @@ function KeywordView({ data }: { data: AnyRecord }) {
               <span>关闭</span>
             </button>
           </div>
-          <EChart height={420} option={drillConfig.option} />
+          <DrillChart rows={daily} buildOption={drillConfig.build} compareEndpoint={drillConfig.endpoint} availableExtras={(drillConfig as { extras?: ExtraMetric[] }).extras} />
         </div>
       )}
       <div className="threeGrid">
@@ -637,9 +1016,15 @@ function KeywordView({ data }: { data: AnyRecord }) {
             <p className="eyebrow">图表-推广关键词分析表</p>
             <h2>关键词明细</h2>
           </div>
-          <span className="pill">共 {fmtInt(table.length)} 条数据</span>
+          <span className="pill">共 {fmtInt(summary.totalGroups ?? table.length)} 组{Number(summary.shownGroups ?? table.length) < Number(summary.totalGroups ?? table.length) ? `,按花费展示前 ${fmtInt(summary.shownGroups)}` : ""}</span>
         </div>
-        <DataTable rows={table} columns={columns} pageSize={18} />
+        <DataTable
+          rows={table}
+          columns={columns}
+          pageSize={18}
+          isExpandable={(row) => Array.isArray(row.daily) && (row.daily as unknown[]).length > 0}
+          renderExpand={(row) => <AdRowDrilldown row={row} />}
+        />
       </div>
     </section>
   );
@@ -650,7 +1035,7 @@ function CrowdView({ data }: { data: AnyRecord }) {
   const summary = data.summary as AnyRecord;
   const table = (data.table as AnyRecord[]) || [];
   const daily = (data.daily as AnyRecord[]) || [];
-  const drillConfig = drilldown === "spendDaily" ? { title: "人群花费分日走势", option: dailySpendOption(daily) } : null;
+  const drillConfig = drilldown === "spendDaily" ? { title: "人群花费分日走势", build: (s: DrillWindowSlice) => dailySpendOption(s.main, s.compare), endpoint: { view: "ad" as const, metric: "spend", metricKey: "spend" } } : null;
   const columns = keywordColumns("crowdCode");
 
   return (
@@ -678,7 +1063,7 @@ function CrowdView({ data }: { data: AnyRecord }) {
               <span>关闭</span>
             </button>
           </div>
-          <EChart height={420} option={drillConfig.option} />
+          <DrillChart rows={daily} buildOption={drillConfig.build} compareEndpoint={drillConfig.endpoint} availableExtras={(drillConfig as { extras?: ExtraMetric[] }).extras} />
         </div>
       )}
       <div className="splitGrid">
@@ -699,7 +1084,13 @@ function CrowdView({ data }: { data: AnyRecord }) {
           </div>
           <span className="pill">共 {fmtInt(table.length)} 条数据</span>
         </div>
-        <DataTable rows={table} columns={columns} pageSize={18} />
+        <DataTable
+          rows={table}
+          columns={columns}
+          pageSize={18}
+          isExpandable={(row) => Array.isArray(row.daily) && (row.daily as unknown[]).length > 0}
+          renderExpand={(row) => <AdRowDrilldown row={row} />}
+        />
       </div>
     </section>
   );
@@ -710,7 +1101,7 @@ function ContentView({ data }: { data: AnyRecord }) {
   const summary = data.summary as AnyRecord;
   const table = (data.table as AnyRecord[]) || [];
   const daily = (data.daily as AnyRecord[]) || [];
-  const drillConfig = drilldown === "spendDaily" ? { title: "内容花费分日走势", option: dailySpendOption(daily) } : null;
+  const drillConfig = drilldown === "spendDaily" ? { title: "内容花费分日走势", build: (s: DrillWindowSlice) => dailySpendOption(s.main, s.compare), endpoint: { view: "ad" as const, metric: "spend", metricKey: "spend" } } : null;
   const columns = keywordColumns("contentCode");
 
   return (
@@ -738,7 +1129,7 @@ function ContentView({ data }: { data: AnyRecord }) {
               <span>关闭</span>
             </button>
           </div>
-          <EChart height={420} option={drillConfig.option} />
+          <DrillChart rows={daily} buildOption={drillConfig.build} compareEndpoint={drillConfig.endpoint} availableExtras={(drillConfig as { extras?: ExtraMetric[] }).extras} />
         </div>
       )}
       <div className="panel">
@@ -756,7 +1147,13 @@ function ContentView({ data }: { data: AnyRecord }) {
           <h2>内容明细</h2>
           <span className="pill">共 {fmtInt(table.length)} 条数据</span>
         </div>
-        <DataTable rows={table} columns={columns} pageSize={18} />
+        <DataTable
+          rows={table}
+          columns={columns}
+          pageSize={18}
+          isExpandable={(row) => Array.isArray(row.daily) && (row.daily as unknown[]).length > 0}
+          renderExpand={(row) => <AdRowDrilldown row={row} />}
+        />
       </div>
     </section>
   );
@@ -854,23 +1251,23 @@ function sceneOption(rows: AnyRecord[] = []) {
   };
 }
 
-function dailyPayOption(rows: AnyRecord[] = []) {
-  return dailyMoneyOption(rows, "pay", "支付金额");
+function dailyPayOption(rows: AnyRecord[] = [], compareRows: AnyRecord[] | null = null) {
+  return dailyMoneyOption(rows, "pay", "支付金额", compareRows);
 }
 
-function dailySpendOption(rows: AnyRecord[] = []) {
-  return dailyMoneyOption(rows, "spend", "花费");
+function dailySpendOption(rows: AnyRecord[] = [], compareRows: AnyRecord[] | null = null) {
+  return dailyMoneyOption(rows, "spend", "花费", compareRows);
 }
 
-function dailyGmvOption(rows: AnyRecord[] = []) {
-  return dailyMoneyOption(rows, "gmv", "成交金额");
+function dailyGmvOption(rows: AnyRecord[] = [], compareRows: AnyRecord[] | null = null) {
+  return dailyMoneyOption(rows, "gmv", "成交金额", compareRows);
 }
 
-function dailyRoiOption(rows: AnyRecord[] = []) {
-  return dailyNumberOption(rows, "roi", "投产");
+function dailyRoiOption(rows: AnyRecord[] = [], compareRows: AnyRecord[] | null = null) {
+  return dailyNumberOption(rows, "roi", "投产", compareRows);
 }
 
-function dailyMoneyOption(rows: AnyRecord[] = [], valueKey: string, metricLabel: string) {
+function dailyMoneyOption(rows: AnyRecord[] = [], valueKey: string, metricLabel: string, compareRows: AnyRecord[] | null = null) {
   const dates = rows.map((row) => String(row.date || ""));
   const values = rows.map((row) => Number(row[valueKey]) || 0);
   const startValue = Math.max(0, dates.length - 45);
@@ -928,12 +1325,13 @@ function dailyMoneyOption(rows: AnyRecord[] = [], valueKey: string, metricLabel:
         itemStyle: { color: "#60c7bc" },
         lineStyle: { color: "#60c7bc", width: 3 },
         data: movingAverage(values, 7)
-      }
+      },
+      ...buildCompareLineSeries(metricLabel, compareRows, dates.length, (r) => Number(r[valueKey]) || 0)
     ]
   };
 }
 
-function dailyNumberOption(rows: AnyRecord[] = [], valueKey: string, metricLabel: string) {
+function dailyNumberOption(rows: AnyRecord[] = [], valueKey: string, metricLabel: string, compareRows: AnyRecord[] | null = null) {
   const dates = rows.map((row) => String(row.date || ""));
   const values = rows.map((row) => {
     const value = Number(row[valueKey]);
@@ -997,23 +1395,55 @@ function dailyNumberOption(rows: AnyRecord[] = [], valueKey: string, metricLabel
         itemStyle: { color: "#60c7bc" },
         lineStyle: { color: "#60c7bc", width: 3 },
         data: movingAverage(values, 7)
-      }
+      },
+      ...buildCompareLineSeries(metricLabel, compareRows, dates.length, (r) => {
+        const v = Number(r[valueKey]);
+        return Number.isFinite(v) ? v : null;
+      })
     ]
   };
 }
 
-function dailyNetFeeOption(rows: AnyRecord[] = []) {
+function dailyNetFeeOption(rows: AnyRecord[] = [], compareRows: AnyRecord[] | null = null, extras: ExtraMetric[] = []) {
   const dates = rows.map((row) => String(row.date || ""));
   const ratios = rows.map((row) => {
     const value = Number(row.netFeeRatio);
     return Number.isFinite(value) ? value : null;
   });
+  const anomalies = rows.map((row) => Boolean(row.anomalous));
   const startValue = Math.max(0, dates.length - 45);
 
   return {
     tooltip: {
       trigger: "axis",
-      valueFormatter: (value: unknown) => fmtPercent(typeof value === "number" ? value : Number(value))
+      backgroundColor: "rgba(20, 24, 16, 0.95)",
+      borderColor: "rgba(245, 200, 119, 0.4)",
+      textStyle: { color: "#f5f0df" },
+      formatter: (params: unknown) => {
+        const arr = Array.isArray(params) ? params : [params];
+        const first = arr[0] as { dataIndex: number; axisValue: string } | undefined;
+        if (!first) return "";
+        const i = first.dataIndex;
+        const row = rows[i] || {};
+        const lines = arr.map((p: any) => {
+          const v = typeof p.value === "object" && p.value !== null ? p.value.value : p.value;
+          return `<div style="margin:2px 0">${p.marker} ${p.seriesName}: <strong>${fmtPercent(Number(v))}</strong></div>`;
+        });
+        let extra = "";
+        const flags = Array.isArray(row.flags) ? (row.flags as AnyRecord[]) : [];
+        if (flags.length > 0) {
+          const flagLines = flags.map((flag) => {
+            const color = flag.severity === "warning" ? "#ff8a2a" : "#f5d27d";
+            return `
+              <div style="margin-top:6px; padding-top:5px; border-top:1px dashed rgba(245,200,119,0.2)">
+                <div style="color:${color}; font-size:12px; font-weight:600">⚠️ ${flag.label}</div>
+                <div style="color:#d9d4c4; margin-top:2px; font-size:11px; max-width:300px">${flag.hint}</div>
+              </div>`;
+          });
+          extra = flagLines.join("");
+        }
+        return `<div><strong>${first.axisValue}</strong>${lines.join("")}${extra}</div>`;
+      }
     },
     legend: { top: 0, textStyle: { color: "#d9d4c4" } },
     grid: { left: 64, right: 24, top: 46, bottom: dates.length > 45 ? 78 : 56 },
@@ -1040,23 +1470,60 @@ function dailyNetFeeOption(rows: AnyRecord[] = []) {
       axisLabel: { color: "#d9d4c4", rotate: 38 },
       axisLine: { lineStyle: { color: "rgba(245, 200, 119, 0.35)" } }
     },
-    yAxis: {
-      type: "value",
-      name: "净费比",
-      axisLabel: { color: "#d9d4c4", formatter: (value: number) => fmtPercent(value) },
-      splitLine: { lineStyle: { color: "rgba(255,255,255,.1)" } }
-    },
+    yAxis: [
+      {
+        type: "value",
+        name: "净费比",
+        axisLabel: { color: "#d9d4c4", formatter: (value: number) => fmtPercent(value) },
+        splitLine: { lineStyle: { color: "rgba(255,255,255,.1)" } }
+      },
+      {
+        type: "value",
+        name: "金额",
+        position: "right",
+        show: extras.some((m) => m.axis === "money"),
+        axisLabel: { color: "#d9d4c4", formatter: (value: number) => fmtMoney(value) },
+        splitLine: { show: false }
+      }
+    ],
     series: [
       {
         name: "净费比",
         type: "line",
+        yAxisIndex: 0,
         smooth: true,
         symbol: "circle",
-        symbolSize: 6,
-        itemStyle: { color: "#f5c877" },
+        symbolSize: (_value: unknown, params: { dataIndex: number }) => (anomalies[params.dataIndex] ? 13 : 6),
+        itemStyle: {
+          color: (params: { dataIndex: number }) => (anomalies[params.dataIndex] ? "#ff5b4d" : "#f5c877")
+        },
         lineStyle: { color: "#f5c877", width: 3 },
         areaStyle: { color: "rgba(245, 200, 119, 0.16)" },
-        data: ratios
+        data: ratios.map((value, index) =>
+          anomalies[index]
+            ? {
+                value,
+                itemStyle: {
+                  color: "#ff5b4d",
+                  borderColor: "#fff5e6",
+                  borderWidth: 2,
+                  shadowColor: "rgba(255, 91, 77, 0.65)",
+                  shadowBlur: 10
+                }
+              }
+            : value
+        ),
+        markPoint: anomalies.some(Boolean)
+          ? {
+              symbol: "pin",
+              symbolSize: 32,
+              itemStyle: { color: "#ff5b4d" },
+              label: { color: "#fff5e6", fontSize: 11, formatter: "异常" },
+              data: anomalies
+                .map((flag, index) => (flag ? { coord: [dates[index], ratios[index]] } : null))
+                .filter(Boolean) as Array<{ coord: [string, number | null] }>
+            }
+          : undefined
       },
       {
         name: "7日均线",
@@ -1066,7 +1533,25 @@ function dailyNetFeeOption(rows: AnyRecord[] = []) {
         itemStyle: { color: "#60c7bc" },
         lineStyle: { color: "#60c7bc", width: 3 },
         data: movingAverage(ratios, 7, 4)
-      }
+      },
+      ...buildCompareLineSeries("净费比", compareRows, dates.length, (r) => {
+        const v = Number(r.netFeeRatio);
+        return Number.isFinite(v) ? v : null;
+      }),
+      // P3.1 用户勾选叠加指标
+      ...extras.map((m) => ({
+        name: m.label,
+        type: "line",
+        yAxisIndex: m.axis === "money" ? 1 : 0,
+        smooth: true,
+        symbol: "none",
+        lineStyle: { color: m.color, width: 2, type: "dotted" },
+        itemStyle: { color: m.color },
+        data: rows.map((r) => {
+          const v = Number(r[m.key]);
+          return Number.isFinite(v) ? v : null;
+        })
+      }))
     ]
   };
 }
@@ -1151,6 +1636,6 @@ function shortText(text: string, max: number) {
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    <RootApp />
   </React.StrictMode>
 );
