@@ -43,6 +43,20 @@ export function useAuth(): AuthState {
       });
   }, [refresh]);
 
+  // 会话过期:任何 /api 401 会派发 auth:unauthorized(见 readApiError)→ 清登录态 + 跳登录页,
+  // 不再出现"疯狂重试 401 + 显示旧数据"的迷惑状态。
+  React.useEffect(() => {
+    const onUnauthorized = () => {
+      setUser(null);
+      setLoading(false);
+      if (!window.location.hash.startsWith("#/login")) {
+        window.location.hash = "#/login";
+      }
+    };
+    window.addEventListener("auth:unauthorized", onUnauthorized);
+    return () => window.removeEventListener("auth:unauthorized", onUnauthorized);
+  }, []);
+
   // P4.9 memo 返回对象,避免每次父级渲染都产生新的 auth 引用
   // 任何下游 React.memo 比较 auth identity 才能稳定
   return React.useMemo(

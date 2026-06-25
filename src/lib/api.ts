@@ -6,6 +6,15 @@
 // 改一处就要改 5 处,容易漏
 
 export async function readApiError(res: Response): Promise<string> {
+  // 会话过期:任何 /api 返回 401 → 派发事件,useAuth 监听后清登录态 + 跳登录页。
+  // 避免会话过期时前端疯狂重试 401 + 显示旧数据的迷惑状态。
+  if (res.status === 401) {
+    try {
+      window.dispatchEvent(new Event("auth:unauthorized"));
+    } catch {
+      /* SSR/无 window 时忽略 */
+    }
+  }
   // 先用 text() 读一次 body,再尝试 JSON.parse。
   // body 为空时(后端进程挂掉 / vite·nginx 返回空 500)直接 res.json() 会抛
   // "Failed to execute 'json' ...: Unexpected end of JSON input",这里改成可读中文。
