@@ -1029,7 +1029,9 @@ async function buildProductViewRaw(userId, range = {}, injected = null) {
   const totalRefund = table.reduce((sum, row) => sum + cleanNumber(row["成功退款金额"]), 0);
   const allocatedSpend = table.reduce((sum, row) => sum + cleanNumber(row["推广消耗"]), 0);
   const promotedItemCount = table.filter((row) => cleanNumber(row["推广消耗"]) > 0).length;
-  const treemap = table.map((row) => ({
+  // treemap 前端只显示 top-140,这里限到 top-200(table 已按 pay 降序);
+  // 原本传全部商品(实测 1733)→ 前端构建 option 要遍历全量、渲染重。share 基数仍用全量 totalPay。
+  const treemap = table.slice(0, 200).map((row) => ({
     name: row.subjectCode,
     value: row.pay,
     share: round(div(row.pay, totalPay), 4),
